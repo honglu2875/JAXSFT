@@ -1,0 +1,28 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Machine-local configuration and secrets.
+.env
+.env.*
+!.env.example
+*.local.toml
+/.jaxsft/
+
+# Large or generated research state.
+/artifacts/
+/cache/
+/checkpoints/
+/data/
+/runs/
+/wandb/
+*.prof
+*.xplane.pb

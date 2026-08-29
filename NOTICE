@@ -1,0 +1,9 @@
+JAXSFT
+Copyright 2026 JAXSFT contributors
+
+The Qwen3.5 mathematical implementation draws on the Apache-2.0-licensed
+JAXML project by Honglu Fan (https://github.com/honglu2875/jaxml) and the
+Apache-2.0-licensed Hugging Face Transformers Qwen3.5 implementation.
+
+The controller orchestration design draws on the Apache-2.0-licensed RIG
+project by Honglu Fan (https://github.com/honglu2875/rig).

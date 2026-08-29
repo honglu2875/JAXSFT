@@ -1,0 +1,26 @@
+# Copy to an ignored `*.local.toml` file. Each `hosts` entry may be a DNS name
+# or IP; `coordinator_host` must be reachable from every slice worker.
+
+schema_version = 1
+name = "four-host-tpu"
+hosts = [
+  "worker-0.example.internal",
+  "worker-1.example.internal",
+  "worker-2.example.internal",
+  "worker-3.example.internal",
+]
+coordinator_host = "worker-0.example.internal"
+coordinator_port = 12355
+
+# These are dedicated, run-scoped paths. The launcher never mutates a broad
+# home/workspace path and never kills by process name.
+remote_workspace_root = "/dev/shm/jaxsft-runs"
+remote_cache_root = "/dev/shm/jaxsft-cache"
+local_artifact_root = "artifacts/cluster"
+
+[ssh]
+user = ""
+identity_file = ""
+connect_timeout_seconds = 8
+connection_attempts = 2
+known_hosts_file = "/tmp/jaxsft-known-hosts"

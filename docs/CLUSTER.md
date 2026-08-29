@@ -1,0 +1,234 @@
+# Four-host slice orchestration plan
+
+## 1. Initial target
+
+The first concrete inventory supplied for the project is a private four-host
+TPU VM slice retained in an ignored local profile. Four SSH targets do **not**
+by themselves prove accelerator
+generation, chips per host, aggregate memory, JAX process order, shared storage,
+internet access, or that the current machine is worker 0. `cluster doctor` must
+measure those facts before a training profile is accepted.
+
+### Controller audit, 2026-08-29
+
+The requested private short names and their standard GCE zonal-DNS forms do not
+resolve from the current controller. The controller can discover another
+four-worker TPU slice, but JAXSFT has deliberately not launched there. The
+controller's service account can identify its own instance but lacks the OAuth
+scope needed to list or describe the requested TPU through the Cloud TPU API. A
+local profile containing the four target IPs/resolvable SSH names (and an
+internally reachable coordinator name) is therefore the remaining launch
+prerequisite.
+
+The checked-in example is [configs/clusters/four-host-tpu.example.toml](../configs/clusters/four-host-tpu.example.toml).
+Operative inventory such as hostnames, IP addresses, and credentials belongs in
+an ignored `*.local.toml` profile and is not published with the source capsule.
+
+## 2. Controller modes
+
+Support both:
+
+- **in-slice controller:** the command runs on one configured worker, which also
+  joins JAX; and
+- **remote controller:** the command runs on a CPU/control machine and launches
+  all workers over SSH without joining JAX.
+
+Auto mode probes reported hostnames and must find exactly one local match or
+none. Ambiguous matches fail. The artifact/checkpoint backend is independent of
+controller mode.
+
+## 3. Local profile
+
+The implemented narrow profile fields are:
+
+```toml
+schema_version = 1
+name = "local-four-host"
+hosts = [
+  "worker-0.example.internal",
+  "worker-1.example.internal",
+  "worker-2.example.internal",
+  "worker-3.example.internal",
+]
+coordinator_host = "worker-0.example.internal"
+coordinator_port = 12355
+
+remote_workspace_root = "/dev/shm/jaxsft-runs"
+remote_cache_root = "/dev/shm/jaxsft-cache"
+local_artifact_root = "artifacts/cluster"
+
+[ssh]
+user = ""
+identity_file = ""
+connect_timeout_seconds = 8
+connection_attempts = 2
+known_hosts_file = "/tmp/jaxsft-known-hosts"
+```
+
+Usernames, identity-file paths, storage credentials, Hub tokens, and cloud
+secrets are local-only. Environment variable **names** may be configured;
+secret values never enter recipe files, source capsules, stdout, or public
+manifests.
+
+## 4. Lifecycle
+
+### Resolve and probe
+
+1. Read an explicit host list and require unique entries.
+2. Probe all entries concurrently through non-interactive OpenSSH; never
+   create/copy/modify keys.
+3. Record target-to-reported-hostname mapping and reject duplicates.
+4. Probe required commands, environment, storage, and accelerator facts.
+5. Run a tiny JAX program on all hosts to validate process count, local/global
+   devices, and collective communication.
+
+Transport status 255 may be retried for idempotent probes. An ordinary remote
+command failure is returned immediately, not mislabeled as SSH flakiness.
+
+### Capture source
+
+Every run creates an immutable source capsule before remote mutation. It
+contains:
+
+- tracked files plus non-ignored untracked files from the exact working tree;
+- entry program and resolved recipe;
+- dependency lock and capsule manifest/hashes.
+
+Ignored caches, data, checkpoints, secrets, `.git`, and virtual environments are
+excluded. Symlinks and files outside the checkout are rejected unless an
+explicit safe inclusion rule materializes them into the capsule.
+
+Unlike mirroring a live checkout into a shared fixed path, a run-specific
+capsule avoids stale modules, concurrent-run interference, and the possibility
+that a later edit mutates a running job.
+
+### Synchronize
+
+- Create a new run-specific remote directory beneath the validated workspace
+  root; an existing target is a hard failure.
+- Stream one tar capsule to all hosts and write its SHA-256 beside the source.
+- Reuse a content-addressed, host-local dependency/model/token/data cache.
+- Install/sync the frozen environment without changing host-wide packages.
+- Support an explicit offline mode that ships the interpreter/`uv` cache and
+  required Hub artifacts; “frozen” alone is not assumed offline.
+- Never use `--delete` outside the exact run directory. Cache cleanup is a
+  separate dry-run-first command.
+
+### Launch
+
+- Launch one identical command per host concurrently through OpenSSH.
+- Pass a run ID, source path, resolved config path, and safe environment only.
+- The worker calls `jax.distributed.initialize()` before `jax.devices()`,
+  `local_device_count()`, mesh construction, or checkpoint setup.
+- Runtime identity comes from `jax.process_index()` and `jax.process_count()`.
+- Host suffix order is used only for inventory display.
+- Each worker writes an early rank handshake and a run-specific PID file.
+- All ranks validate the same source/config hashes before compilation.
+
+### Monitor and collect
+
+- Preserve rank-specific stdout/stderr rather than interleaving away identity.
+- Write structured heartbeat/step records atomically.
+- Surface the first failing rank and retain all other rank tails.
+- Periodically collect complete logs/manifests in remote-controller mode without
+  copying temporary in-progress files.
+- Treat successful launcher exit as necessary but insufficient: validate the
+  final result, all-rank completion, checkpoint marker, and artifact hashes.
+
+### Stop
+
+1. Send an in-band stop or SIGTERM to PIDs recorded for this run.
+2. Wait a bounded grace period and collect last logs/checkpoint status.
+3. Escalate only the same recorded PIDs/process groups.
+4. Report any unreachable host or surviving exact PID.
+
+Do not use `pkill python`, substring-only job matching, or a kill command that
+can affect another run.
+
+## 5. Doctor checks
+
+`python cluster.py doctor` is read-only apart from an explicitly configured
+known-hosts file and currently reports:
+
+- expanded targets and reported hostnames;
+- controller mode and local-host match;
+- SSH latency/retry result and OpenSSH version;
+- OS, kernel, architecture, Python, `uv`, `rsync`, and `pdsh` availability;
+- installed JAX (when visible to system Python) and accelerator metadata;
+- RAM, disk, cache free space, `/dev/shm` mount/type/size, and inode pressure;
+- whether configured work/cache/artifact paths are local, shared, and writable;
+- outbound Hub/object-store reachability without displaying credentials;
+- clock skew sufficient to explain logs (not used for run identity);
+- A deeper multi-process collective/checkpoint doctor remains an M3 gate.
+
+Any expected topology recorded in a cluster profile is an assertion checked
+against these measurements.
+
+## 6. Data placement
+
+Code is small; tokenized instruction data and model weights are not. Use
+content-addressed caches on every worker, keyed by immutable Hub revision and
+preprocessing manifest. The options are:
+
+- each host downloads/verifies identical source artifacts when outbound access
+  is reliable;
+- the controller downloads once and ships missing files;
+- a shared/object store supplies source artifacts while local disks cache them.
+
+Prepared data is deterministically sharded by global process identity. A host
+must never substitute a different dataset because a cache is missing. Staging
+and verification happen before measured training.
+
+The initial smoke profile uses `/dev/shm` only after the controller audit showed
+ample capacity on the current TPU VM shape. It is disposable hot storage, not
+the eventual durable checkpoint backend.
+
+## 7. Checkpoint storage
+
+Portable multi-host checkpoint semantics remain an M3 blocker. The current
+trainer can gather a small replicated smoke state on rank 0, but the production
+contract requires one of:
+
+1. a shared filesystem/object-store backend supported by the chosen checkpoint
+   implementation;
+2. coordinated host-local shard staging followed by verified collection into a
+   complete portable checkpoint;
+3. single-host gathering only for small smoke states, never as the assumed path
+   for large models.
+
+The selected path must survive a cold restore on all four hosts. A checkpoint
+written only to one worker's local disk is not called complete unless the model
+state was intentionally gathered there and validated.
+
+## 8. Testing without a real slice
+
+Most orchestration tests use fake `ssh`, `pdsh`, and `rsync` executables and
+temporary host roots to verify:
+
+- host expansion/count validation;
+- shell quoting and environment-name validation;
+- source capsule exclusions and path containment;
+- retries only for transport failures;
+- failure propagation and log attribution;
+- run-specific synchronization and stop targeting;
+- artifact collection that skips temporary files;
+- remote versus in-slice controller identity.
+
+Forced multi-device CPU JAX tests cover rank-independent mesh/loss logic where
+possible. Real-slice tests remain explicit, short, and destructive only inside
+a generated run directory.
+
+## 9. First slice acceptance test
+
+Before loading a real model:
+
+1. run doctor on all four targets;
+2. sync a source capsule containing a toy linear model and synthetic batch;
+3. initialize four JAX processes and print measured topology once per rank;
+4. prove a global `psum` and a sharded parameter update;
+5. save a toy optimizer/data-cursor checkpoint;
+6. terminate all workers;
+7. start a fresh four-host process set, restore, and perform the next update;
+8. collect and verify every artifact hash from the controller.
+
+Only then should a Qwen checkpoint or instruction dataset be staged.

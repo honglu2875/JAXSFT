@@ -1,0 +1,58 @@
+[project]
+name = "jaxsft"
+version = "0.1.0.dev0"
+description = "Metadata-first supervised fine-tuning of open-weight models in JAX"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "Apache-2.0"
+authors = [{name = "JAXSFT contributors"}]
+dependencies = [
+    "datasets>=4.4,<5",
+    "huggingface-hub>=1.3,<2",
+    "jax[tpu]==0.11.0",
+    "numpy>=2.4,<3",
+    "pyyaml>=6.0,<7",
+    "safetensors>=0.7,<1",
+    "tokenizers>=0.22,<1",
+]
+
+[project.optional-dependencies]
+parity = [
+    "torch>=2.10,<3",
+    "transformers>=5.0,<6",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4,<10",
+    "ruff>=0.12,<1",
+]
+
+[project.scripts]
+jaxsft = "jaxsft.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jaxsft"]
+
+[tool.uv]
+package = true
+required-version = ">=0.11.0"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "parity: requires the optional PyTorch and Transformers oracle",
+    "network: requires access to the Hugging Face Hub",
+    "tpu: requires a TPU runtime",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]
