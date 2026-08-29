@@ -126,15 +126,17 @@ def _span(
     default_weight: float = 0.0,
 ) -> RenderedSpan:
     semantic_ref = None
+    message_call_id = None
     if message_index is not None:
         semantic_ref = SemanticRef(sample.id, message_index, part_index)
+        message_call_id = sample.messages[message_index].call_id
     return RenderedSpan(
         text=text,
         semantic_ref=semantic_ref,
         span_class=span_class,
         role=role,
         part_kind=None if part is None else part.kind,
-        call_id=None if part is None else part.call_id,
+        call_id=message_call_id if part is None or part.call_id is None else part.call_id,
         tool_name=None if part is None else part.tool_name,
         tags=frozenset() if part is None else part.tags,
         default_weight=default_weight,

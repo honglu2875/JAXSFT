@@ -515,6 +515,7 @@ def run(args: argparse.Namespace) -> int:
             "data": {
                 "repo_id": recipe.data.repo_id,
                 "revision": recipe.data.revision,
+                "loading_mode": recipe.data.loading_mode,
                 "renderer": renderer_identity(recipe.data.renderer or recipe.model.architecture),
             },
             "tokenizer": None
@@ -675,7 +676,9 @@ def run(args: argparse.Namespace) -> int:
                 emit("checkpoint", rank=process_index, step=completed_step, path=checkpoint_path)
     finally:
         if stream is not None:
+            close_started = time.monotonic()
             stream.close()
+            emit("data_stream_closed", rank=process_index, seconds=time.monotonic() - close_started)
 
     multihost_utils.sync_global_devices("jaxsft-finished")
     status = "complete" if stop_step == recipe.training.steps else "stopped"
@@ -711,9 +714,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> int:
     try:
-        raise SystemExit(run(parse_args()))
+        return run(parse_args(argv))
     finally:
         if jax.distributed.is_initialized():
+            started = time.monotonic()
+            emit("distributed_shutdown_started", rank=jax.process_index())
             jax.distributed.shutdown()
+            emit("distributed_shutdown_complete", seconds=time.monotonic() - started)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

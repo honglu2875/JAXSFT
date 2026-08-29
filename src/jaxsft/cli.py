@@ -88,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     explain.add_argument("--max-length", type=int)
     explain.add_argument(
         "--truncation",
-        choices=("reject", "right", "left", "loss_aware"),
+        choices=("reject", "right", "left", "loss_aware", "semantic_loss_aware"),
         default="reject",
     )
     explain.add_argument("--truncation-min-context-tokens", type=int, default=0)

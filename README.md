@@ -27,18 +27,21 @@ in its checked-in recipe or renderer identity.
   unsupported OLMo tool/reasoning semantics are rejected.
 - Ordered role/part/span/tool loss rules, fractional weights, explicit causal
   target shifting, and globally additive numerator/denominator reduction.
-- Loss-aware truncation that maximizes retained configured objective weight,
-  reserves an explicit prefix-context budget, and records every dropped input
-  token, selected token, and unit of objective weight.
+- Token-window and semantic loss-aware truncation that maximize retained
+  configured objective weight and reserve an explicit prefix-context budget.
+  The semantic policy keeps complete messages and tool-call/result/final-answer
+  chains atomic while recording dropped messages, tokens, and objective weight.
 - One visible `train_sft.py` loop with gradient accumulation, rematerialization,
-  clipping, AdamW, cosine scheduling, rank-disjoint streaming data, structured
-  artifacts, replicated data parallelism, and strict checkpoint/resume.
+  clipping, AdamW, cosine scheduling, rank-disjoint streaming or materialized
+  Hub data, structured artifacts, replicated data parallelism, and strict
+  checkpoint/resume.
 - Controller-only `cluster.py doctor|sync|run|status|stop|collect`, immutable
-  source capsules, per-run remote directories, and exact recorded-PID teardown.
+  source capsules, per-run remote directories, conservative stale-libtpu-lock
+  recovery, and exact recorded-PID teardown.
 - CPU tests, forced four-device CPU smoke, optional Transformers/PyTorch parity,
   and a frozen `uv.lock`.
 
-The validation gates pass for 42 offline unit tests; byte/token template parity;
+The validation gates pass for 64 offline unit tests; byte/token template parity;
 and tiny-model valid-logit/loss/gradient/AdamW-step parity against Transformers
 and PyTorch for both architectures. Qwen has an exact 320-tensor,
 752,393,024-parameter public-checkpoint audit. A measured single-host v4-8 run
@@ -72,6 +75,19 @@ byte-identical to an uninterrupted reference. See the
 [model card](docs/models/olmo2.md) and
 [sanitized result](docs/results/olmo2_1b_v4_8_smoke.json).
 
+The next data/objective gate adds `semantic_loss_aware`: candidate windows must
+align to complete messages, while linked tool-call/result/chained-call/final
+answer transactions remain indivisible and retain any tool-definition preamble.
+A three-step OLMo 2 run against a materialized copy of the same pinned UltraChat
+split completed with 12/12 emitted samples semantically truncated, zero
+zero-objective samples, explicit rejection/relaxation counters, and a clean
+worker exit. See the
+[semantic result](docs/results/olmo2_1b_v4_8_semantic_smoke.json).
+With the frozen `datasets==4.8.5`/`huggingface-hub==1.29.0` stack, direct remote
+parquet streaming completes training artifacts but can linger in PyArrow HTTP
+finalization. It is therefore an experimental loading mode; use
+`loading_mode: materialized` for a clean validated worker lifecycle.
+
 ## Quick start
 
 Python 3.12 and `uv` are required.
@@ -101,6 +117,11 @@ uv run python train_sft.py \
 JAX_PLATFORMS=cpu uv run python train_sft.py \
   --config configs/recipes/olmo2_1b_ultrachat_loss_aware_smoke.yaml \
   --synthetic --synthetic-length 32
+
+# Inspect the complete-message semantic policy and materialized-data mode.
+uv run python train_sft.py \
+  --config configs/recipes/olmo2_1b_ultrachat_semantic_smoke.yaml \
+  --dry-run
 ```
 
 Inspect one dataset row all the way through span ownership and token weights:
@@ -136,10 +157,12 @@ python3.12 cluster.py status \
 All workers install the frozen environment and cache Hub/JAX state under the
 profile's dedicated run/cache roots. A worker without `uv` receives the
 controller's exact executable at a SHA-addressed cache path; nothing is
-installed into system Python. The launcher never changes SSH keys, modifies
-host-wide packages, overwrites an existing run directory, or kills by process
-name. Add `--synthetic` to `cluster.py run` for a tiny architecture/topology
-smoke before resolving public weights.
+installed into system Python. Before launch, the controller refuses an active
+TPU owner and only removes an unowned, regular, zero-byte libtpu lockfile. The
+launcher never changes SSH keys, modifies host-wide packages, overwrites an
+existing run directory, or kills by process name. Add `--synthetic` to
+`cluster.py run` for a tiny architecture/topology smoke before resolving public
+weights.
 
 ## Repository map
 

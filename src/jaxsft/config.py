@@ -52,6 +52,7 @@ class DataSpec:
     split: str
     adapter: str
     renderer: str | None = None
+    loading_mode: str = "streaming"
     shuffle_seed: int = 17
     shuffle_buffer_size: int = 10_000
 
@@ -99,6 +100,8 @@ class Recipe:
         result.pop("source_path", None)
         if result["data"]["renderer"] is None:
             result["data"].pop("renderer")
+        if result["data"]["loading_mode"] == "streaming":
+            result["data"].pop("loading_mode")
         return result
 
 
@@ -141,6 +144,7 @@ def load_recipe(path: str | Path) -> Recipe:
             "split",
             "adapter",
             "renderer",
+            "loading_mode",
             "shuffle_seed",
             "shuffle_buffer_size",
         },
@@ -153,11 +157,14 @@ def load_recipe(path: str | Path) -> Recipe:
         split=str(data["split"]),
         adapter=str(data["adapter"]),
         renderer=None if data.get("renderer") is None else str(data["renderer"]),
+        loading_mode=str(data.get("loading_mode", "streaming")),
         shuffle_seed=int(data.get("shuffle_seed", 17)),
         shuffle_buffer_size=int(data.get("shuffle_buffer_size", 10_000)),
     )
     if data_spec.renderer not in {None, "qwen3_5", "olmo2_instruct"}:
         raise ValueError("data.renderer must be qwen3_5 or olmo2_instruct")
+    if data_spec.loading_mode not in {"streaming", "materialized"}:
+        raise ValueError("data.loading_mode must be streaming or materialized")
     if data_spec.shuffle_buffer_size <= 0:
         raise ValueError("data.shuffle_buffer_size must be positive")
 
@@ -211,12 +218,20 @@ def load_recipe(path: str | Path) -> Recipe:
             raise ValueError(f"training.{name} must be positive")
     if training_spec.max_length < 2:
         raise ValueError("training.max_length must be at least 2 for causal SFT")
-    if training_spec.truncation not in {"right", "left", "loss_aware", "reject"}:
-        raise ValueError("training.truncation must be right, left, loss_aware, or reject")
+    loss_aware_truncation = {"loss_aware", "semantic_loss_aware"}
+    if training_spec.truncation not in {"right", "left", "reject", *loss_aware_truncation}:
+        raise ValueError(
+            "training.truncation must be right, left, loss_aware, semantic_loss_aware, or reject"
+        )
     if not 0 <= training_spec.truncation_min_context_tokens < training_spec.max_length:
         raise ValueError("training.truncation_min_context_tokens must be in [0, max_length)")
-    if training_spec.truncation != "loss_aware" and training_spec.truncation_min_context_tokens:
-        raise ValueError("training.truncation_min_context_tokens is only valid with loss_aware truncation")
+    if (
+        training_spec.truncation not in loss_aware_truncation
+        and training_spec.truncation_min_context_tokens
+    ):
+        raise ValueError(
+            "training.truncation_min_context_tokens is only valid with a loss-aware truncation policy"
+        )
     if not 0 <= training_spec.warmup_steps < training_spec.steps:
         raise ValueError("training.warmup_steps must be smaller than steps")
     if training_spec.checkpoint_every < 0:
@@ -259,6 +274,9 @@ def load_recipe(path: str | Path) -> Recipe:
         # Preserve schema-1 identities from before renderers became explicit.
         # An omitted renderer retains the architecture-derived legacy behavior.
         resolved_data.pop("renderer")
+    if resolved_data["loading_mode"] == "streaming":
+        # Preserve schema-1 identities from before loading mode was explicit.
+        resolved_data.pop("loading_mode")
     resolved = {
         "schema_version": 1,
         "model": asdict(model_spec),

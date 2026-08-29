@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from .ir import FrozenMap, Message, Part, Sample, SourceRef, ToolDefinition, freeze_json
@@ -44,6 +44,14 @@ def _sample_id(context: AdapterContext, row: Mapping[str, Any]) -> str:
     return f"{context.repo_id}:{context.split}:{hashlib.sha256(identity.encode()).hexdigest()}"
 
 
+def _optional_identifier(value: Any, *, path: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise AdapterError(f"{path} must be a non-empty string when present")
+    return value
+
+
 def _text_parts(content: Any, *, role: str, path: str) -> list[Part]:
     if isinstance(content, str):
         kind = "tool_result" if role == "tool" else "text"
@@ -77,7 +85,7 @@ def _text_parts(content: Any, *, role: str, path: str) -> list[Part]:
                 Part(
                     kind="tool_call",
                     value=freeze_json(arguments, path=f"{block_path}.arguments"),
-                    call_id=block.get("id"),
+                    call_id=_optional_identifier(block.get("id"), path=f"{block_path}.id"),
                     tool_name=name,
                 )
             )
@@ -85,7 +93,13 @@ def _text_parts(content: Any, *, role: str, path: str) -> list[Part]:
             value = block.get("content")
             if not isinstance(value, str):
                 raise AdapterError(f"{block_path}.content must be a string")
-            parts.append(Part(kind="tool_result", value=value, call_id=block.get("tool_use_id")))
+            parts.append(
+                Part(
+                    kind="tool_result",
+                    value=value,
+                    call_id=_optional_identifier(block.get("tool_use_id"), path=f"{block_path}.tool_use_id"),
+                )
+            )
         elif block_type in ("image", "image_url", "video"):
             parts.append(Part(kind="media", value=freeze_json(block, path=block_path)))
         else:
@@ -119,7 +133,7 @@ def _tool_call_parts(raw_calls: Any, *, path: str) -> list[Part]:
             Part(
                 kind="tool_call",
                 value=freeze_json(arguments, path=f"{call_path}.function.arguments"),
-                call_id=raw_call.get("id"),
+                call_id=_optional_identifier(raw_call.get("id"), path=f"{call_path}.id"),
                 tool_name=name,
             )
         )
@@ -149,12 +163,27 @@ def _adapt_messages(raw_messages: Any) -> tuple[Message, ...]:
                 raise AdapterError(f"{path}.reasoning_content requires an assistant string")
             parts.insert(0, Part(kind="reasoning", value=reasoning))
         parts.extend(_tool_call_parts(raw_message.get("tool_calls"), path=f"{path}.tool_calls"))
+        message_call_id = _optional_identifier(
+            raw_message.get("tool_call_id", raw_message.get("call_id")),
+            path=f"{path}.tool_call_id",
+        )
+        message_name = _optional_identifier(raw_message.get("name"), path=f"{path}.name")
+        if role == "tool":
+            linked_parts = []
+            for part in parts:
+                if part.kind != "tool_result":
+                    linked_parts.append(part)
+                    continue
+                if part.call_id is not None and message_call_id is not None and part.call_id != message_call_id:
+                    raise AdapterError(f"{path} has conflicting tool-result call IDs")
+                linked_parts.append(replace(part, call_id=part.call_id or message_call_id))
+            parts = linked_parts
         messages.append(
             Message(
                 role=role,
                 parts=tuple(parts),
-                name=raw_message.get("name"),
-                call_id=raw_message.get("tool_call_id", raw_message.get("call_id")),
+                name=message_name,
+                call_id=message_call_id,
             )
         )
     return tuple(messages)

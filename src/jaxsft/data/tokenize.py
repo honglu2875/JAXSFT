@@ -18,6 +18,10 @@ class AlignmentError(ValueError):
     """A token cannot be assigned semantic ownership unambiguously."""
 
 
+class SemanticTruncationError(ValueError):
+    """A sample cannot satisfy the declared semantic truncation contract."""
+
+
 @dataclass(frozen=True)
 class TokenMetadata:
     span_index: int
@@ -145,6 +149,12 @@ class TokenizedSample:
                 sum(self.loss_weights), self.truncation_record.retained_weight, rel_tol=1e-12, abs_tol=1e-12
             ):
                 raise ValueError("retained objective weight differs from truncation record")
+            if self.truncation_record.semantic_boundary_aligned:
+                retained_messages = tuple(
+                    sorted({item.message_index for item in self.metadata if item.message_index is not None})
+                )
+                if retained_messages != self.truncation_record.retained_message_indices:
+                    raise ValueError("retained token metadata differs from semantic truncation record")
 
     @property
     def selected_tokens(self) -> int:
@@ -168,6 +178,14 @@ class TruncationRecord:
     minimum_context_tokens: int
     retained_context_tokens: int
     context_constraint_satisfied: bool
+    semantic_boundary_aligned: bool = False
+    original_message_indices: tuple[int, ...] = ()
+    retained_message_indices: tuple[int, ...] = ()
+    dropped_message_indices: tuple[int, ...] = ()
+    original_atomic_units: int = 0
+    retained_atomic_units: int = 0
+    original_tool_atomic_units: int = 0
+    retained_tool_atomic_units: int = 0
 
     def __post_init__(self) -> None:
         if not 0 <= self.start < self.end <= self.original_length:
@@ -180,6 +198,32 @@ class TruncationRecord:
             raise ValueError("truncation context counts must be non-negative")
         if self.context_constraint_satisfied and self.retained_context_tokens < self.minimum_context_tokens:
             raise ValueError("satisfied truncation record violates its context minimum")
+        if self.semantic_boundary_aligned:
+            if self.policy != "semantic_loss_aware":
+                raise ValueError("semantic boundary alignment requires semantic_loss_aware policy")
+            original = set(self.original_message_indices)
+            retained = set(self.retained_message_indices)
+            dropped = set(self.dropped_message_indices)
+            if retained & dropped or retained | dropped != original:
+                raise ValueError("retained/dropped semantic messages must partition the original messages")
+            if tuple(sorted(original)) != self.original_message_indices:
+                raise ValueError("semantic message indices must be sorted and unique")
+            if self.original_atomic_units < self.retained_atomic_units:
+                raise ValueError("semantic truncation cannot add atomic units")
+            if self.original_tool_atomic_units < self.retained_tool_atomic_units:
+                raise ValueError("semantic truncation cannot add tool atomic units")
+        elif any(
+            (
+                self.original_message_indices,
+                self.retained_message_indices,
+                self.dropped_message_indices,
+                self.original_atomic_units,
+                self.retained_atomic_units,
+                self.original_tool_atomic_units,
+                self.retained_tool_atomic_units,
+            )
+        ):
+            raise ValueError("token-only truncation cannot claim semantic boundary metadata")
 
 
 class Encoded(Protocol):
@@ -337,6 +381,302 @@ def _loss_aware_window(
     return start, end, retained_context_tokens, constraint_satisfied
 
 
+@dataclass(frozen=True)
+class _SemanticUnit:
+    start: int
+    end: int
+    message_indices: tuple[int, ...]
+    tool_exchange: bool = False
+
+
+@dataclass(frozen=True)
+class _MessageBlock:
+    start: int
+    end: int
+    message_index: int
+    role: str
+    tool_call_ids: frozenset[str] = frozenset()
+    tool_result_ids: frozenset[str] = frozenset()
+    missing_tool_call_id: bool = False
+    duplicate_tool_call_id: bool = False
+
+    @property
+    def has_tool_call(self) -> bool:
+        return bool(self.tool_call_ids) or self.missing_tool_call_id
+
+
+@dataclass(frozen=True)
+class _SemanticWindow:
+    start: int
+    end: int
+    retained_context_tokens: int
+    context_constraint_satisfied: bool
+    original_message_indices: tuple[int, ...]
+    retained_message_indices: tuple[int, ...]
+    original_atomic_units: int
+    retained_atomic_units: int
+    original_tool_atomic_units: int
+    retained_tool_atomic_units: int
+
+
+def _semantic_units(metadata: list[TokenMetadata]) -> tuple[_SemanticUnit, ...]:
+    """Build contiguous message units, making each tool exchange indivisible."""
+
+    message_indices: list[int] = []
+    starts: list[int] = []
+    seen: set[int] = set()
+    previous: int | None = None
+    for token_index, item in enumerate(metadata):
+        message_index = item.message_index
+        if message_index is None or message_index == previous:
+            continue
+        if message_index in seen or (message_indices and message_index <= message_indices[-1]):
+            raise SemanticTruncationError(
+                "semantic truncation requires each message to own one ordered token interval"
+            )
+        seen.add(message_index)
+        message_indices.append(message_index)
+        starts.append(token_index)
+        previous = message_index
+    if not message_indices:
+        raise SemanticTruncationError("semantic truncation requires rendered message ownership metadata")
+    # Leading BOS/tool-preamble tokens belong to the first rendered message;
+    # unowned separators between messages remain with the message on their left.
+    starts[0] = 0
+
+    blocks: list[_MessageBlock] = []
+    for block_index, (message_index, start) in enumerate(zip(message_indices, starts)):
+        end = starts[block_index + 1] if block_index + 1 < len(starts) else len(metadata)
+        owned = [item for item in metadata[start:end] if item.message_index == message_index]
+        roles = {item.role for item in owned if item.role is not None}
+        if len(roles) != 1:
+            raise SemanticTruncationError(
+                f"semantic truncation found ambiguous role ownership for message {message_index}"
+            )
+        tool_call_refs = {
+            (item.part_index, item.call_id)
+            for item in owned
+            if item.part_kind == "tool_call"
+        }
+        nonmissing_call_refs = {item for item in tool_call_refs if item[1] is not None}
+        blocks.append(
+            _MessageBlock(
+                start=start,
+                end=end,
+                message_index=message_index,
+                role=next(iter(roles)),
+                tool_call_ids=frozenset(item[1] for item in nonmissing_call_refs),
+                tool_result_ids=frozenset(
+                    item.call_id for item in owned if item.role == "tool" and item.call_id is not None
+                ),
+                missing_tool_call_id=any(item[1] is None for item in tool_call_refs),
+                duplicate_tool_call_id=(
+                    len(nonmissing_call_refs)
+                    != len({item[1] for item in nonmissing_call_refs})
+                ),
+            )
+        )
+
+    seen_call_ids: set[str] = set()
+    seen_result_ids: set[str] = set()
+    for block in blocks:
+        if block.has_tool_call and block.role != "assistant":
+            raise SemanticTruncationError(
+                "semantic truncation requires tool calls to belong to an assistant message"
+            )
+        duplicate_calls = seen_call_ids & block.tool_call_ids
+        if duplicate_calls:
+            raise SemanticTruncationError("semantic truncation found a reused tool-call ID")
+        seen_call_ids.update(block.tool_call_ids)
+        if block.role == "tool":
+            duplicate_results = seen_result_ids & block.tool_result_ids
+            if duplicate_results:
+                raise SemanticTruncationError("semantic truncation found duplicate results for one tool-call ID")
+            seen_result_ids.update(block.tool_result_ids)
+
+    units: list[_SemanticUnit] = []
+    index = 0
+    while index < len(blocks):
+        block = blocks[index]
+        if block.role == "tool":
+            raise SemanticTruncationError(
+                "semantic truncation found a tool result without its preceding tool-call message"
+            )
+        if not block.has_tool_call:
+            units.append(
+                _SemanticUnit(
+                    start=block.start,
+                    end=block.end,
+                    message_indices=(block.message_index,),
+                )
+            )
+            index += 1
+            continue
+
+        if block.missing_tool_call_id:
+            raise SemanticTruncationError("semantic truncation requires every tool call to have a call ID")
+        if block.duplicate_tool_call_id:
+            raise SemanticTruncationError("semantic truncation found duplicate tool-call IDs in one message")
+
+        # A tool-call assistant message, its consecutive result messages, any
+        # chained calls, and the immediate final assistant answer form one unit.
+        group = [block]
+        index += 1
+        pending_call_ids = set(block.tool_call_ids)
+        observed_result_ids: set[str] = set()
+        has_final_answer = False
+        while index < len(blocks):
+            candidate = blocks[index]
+            if candidate.role == "tool":
+                if len(candidate.tool_result_ids) != 1:
+                    raise SemanticTruncationError(
+                        "semantic truncation requires each tool result to have exactly one call ID"
+                    )
+                result_id = next(iter(candidate.tool_result_ids))
+                if result_id not in pending_call_ids:
+                    raise SemanticTruncationError(
+                        "semantic truncation found a tool result linked to an unknown call ID"
+                    )
+                if result_id in observed_result_ids:
+                    raise SemanticTruncationError(
+                        "semantic truncation found duplicate results for one tool-call ID"
+                    )
+                observed_result_ids.add(result_id)
+                group.append(candidate)
+                index += 1
+                continue
+            if candidate.role == "assistant" and observed_result_ids == pending_call_ids:
+                group.append(candidate)
+                index += 1
+                if candidate.has_tool_call:
+                    if candidate.missing_tool_call_id:
+                        raise SemanticTruncationError(
+                            "semantic truncation requires every tool call to have a call ID"
+                        )
+                    if candidate.duplicate_tool_call_id:
+                        raise SemanticTruncationError(
+                            "semantic truncation found duplicate tool-call IDs in one message"
+                        )
+                    pending_call_ids = set(candidate.tool_call_ids)
+                    observed_result_ids = set()
+                    continue
+                has_final_answer = True
+                break
+            break
+        if observed_result_ids != pending_call_ids:
+            raise SemanticTruncationError("semantic truncation found a tool call without all linked results")
+        if not has_final_answer:
+            raise SemanticTruncationError(
+                "semantic truncation requires an immediate final assistant answer after tool results"
+            )
+        units.append(
+            _SemanticUnit(
+                start=group[0].start,
+                end=group[-1].end,
+                message_indices=tuple(item.message_index for item in group),
+                tool_exchange=True,
+            )
+        )
+    return tuple(units)
+
+
+def _semantic_loss_aware_window(
+    metadata: list[TokenMetadata],
+    weights: list[float],
+    max_length: int,
+    *,
+    minimum_context_tokens: int,
+    units: tuple[_SemanticUnit, ...] | None = None,
+) -> _SemanticWindow:
+    """Optimize objective weight over complete message/tool-exchange units."""
+
+    units = _semantic_units(metadata) if units is None else units
+    tool_preamble_present = any(
+        item.message_index is None and item.span_class in {"tool_preamble", "tool_definition"}
+        for item in metadata
+    )
+    size = len(weights)
+    prefix = [0.0]
+    latest = -1
+    last_positive: list[int] = []
+    for index, weight in enumerate(weights):
+        prefix.append(prefix[-1] + weight)
+        if weight > 0:
+            latest = index
+        last_positive.append(latest)
+    next_positive = [size] * (size + 1)
+    nearest = size
+    for index in range(size - 1, -1, -1):
+        if weights[index] > 0:
+            nearest = index
+        next_positive[index] = nearest
+
+    def choose(*, enforce_context: bool) -> tuple[int, int, int, int] | None:
+        best: tuple[int, int, int, int] | None = None
+        best_weight = -1.0
+        best_tie = (-1, -1, -1, -1)
+        for first_unit in range(len(units)):
+            for final_unit in range(first_unit, len(units)):
+                start, end = units[first_unit].start, units[final_unit].end
+                if end - start > max_length:
+                    break
+                if (
+                    tool_preamble_present
+                    and first_unit > 0
+                    and any(unit.tool_exchange for unit in units[first_unit : final_unit + 1])
+                ):
+                    continue
+                first_target = next_positive[start + 1]
+                retained_weight = prefix[end] - prefix[start + 1]
+                if latest >= 0 and (first_target >= end or retained_weight <= 0):
+                    continue
+                context_tokens = first_target - start if first_target < end else 0
+                if enforce_context and context_tokens < minimum_context_tokens:
+                    continue
+                last_target = last_positive[end - 1]
+                if last_target <= start:
+                    last_target = -1
+                tie = (last_target, context_tokens, end - start, -start)
+                if retained_weight > best_weight and not math.isclose(
+                    retained_weight, best_weight, rel_tol=1e-12, abs_tol=1e-12
+                ):
+                    best_weight = retained_weight
+                    best_tie = tie
+                    best = (first_unit, final_unit, context_tokens, start)
+                elif math.isclose(
+                    retained_weight, best_weight, rel_tol=1e-12, abs_tol=1e-12
+                ) and tie > best_tie:
+                    best_weight = retained_weight
+                    best_tie = tie
+                    best = (first_unit, final_unit, context_tokens, start)
+        return best
+
+    selected = choose(enforce_context=minimum_context_tokens > 0)
+    constraint_satisfied = selected is not None
+    if selected is None:
+        selected = choose(enforce_context=False)
+    if selected is None:
+        raise SemanticTruncationError(
+            f"semantic truncation cannot retain a complete objective-bearing unit within max_length={max_length}"
+        )
+    first_unit, final_unit, context_tokens, _ = selected
+    retained_units = units[first_unit : final_unit + 1]
+    original_messages = tuple(index for unit in units for index in unit.message_indices)
+    retained_messages = tuple(index for unit in retained_units for index in unit.message_indices)
+    return _SemanticWindow(
+        start=retained_units[0].start,
+        end=retained_units[-1].end,
+        retained_context_tokens=context_tokens,
+        context_constraint_satisfied=constraint_satisfied,
+        original_message_indices=original_messages,
+        retained_message_indices=retained_messages,
+        original_atomic_units=len(units),
+        retained_atomic_units=len(retained_units),
+        original_tool_atomic_units=sum(unit.tool_exchange for unit in units),
+        retained_tool_atomic_units=sum(unit.tool_exchange for unit in retained_units),
+    )
+
+
 def tokenize_document(
     document: RenderedDocument,
     encoder: Encoder,
@@ -352,8 +692,9 @@ def tokenize_document(
     policy = policy or LossPolicy()
     if truncation_min_context_tokens < 0:
         raise ValueError("truncation_min_context_tokens must be non-negative")
-    if truncation != "loss_aware" and truncation_min_context_tokens:
-        raise ValueError("truncation_min_context_tokens is only valid with loss_aware truncation")
+    loss_aware_policies = {"loss_aware", "semantic_loss_aware"}
+    if truncation not in loss_aware_policies and truncation_min_context_tokens:
+        raise ValueError("truncation_min_context_tokens is only valid with a loss-aware truncation policy")
     encoded = encoder.encode(document.text, add_special_tokens=False)
     ids = tuple(int(token_id) for token_id in encoded.ids)
     offsets = tuple((int(left), int(right)) for left, right in encoded.offsets)
@@ -394,6 +735,8 @@ def tokenize_document(
     if missing:
         raise ValueError(f"required loss rules matched no tokens: {missing}")
 
+    semantic_units = _semantic_units(metadata) if truncation == "semantic_loss_aware" else None
+
     truncation_record = None
     if max_length is not None and len(ids) > max_length:
         if max_length < 2:
@@ -412,9 +755,24 @@ def tokenize_document(
                 max_length,
                 minimum_context_tokens=truncation_min_context_tokens,
             )
+        elif truncation == "semantic_loss_aware":
+            if truncation_min_context_tokens >= max_length:
+                raise ValueError("truncation_min_context_tokens must be smaller than max_length")
+            semantic = _semantic_loss_aware_window(
+                metadata,
+                weights,
+                max_length,
+                minimum_context_tokens=truncation_min_context_tokens,
+                units=semantic_units,
+            )
+            start, end = semantic.start, semantic.end
+            retained_context_tokens = semantic.retained_context_tokens
+            context_constraint_satisfied = semantic.context_constraint_satisfied
         else:
-            raise ValueError("truncation must be reject, right, left, or loss_aware")
-        if truncation != "loss_aware":
+            raise ValueError(
+                "truncation must be reject, right, left, loss_aware, or semantic_loss_aware"
+            )
+        if truncation not in loss_aware_policies:
             retained_context_tokens = 0
             context_constraint_satisfied = True
         original_length = len(ids)
@@ -436,6 +794,32 @@ def tokenize_document(
             minimum_context_tokens=truncation_min_context_tokens,
             retained_context_tokens=retained_context_tokens,
             context_constraint_satisfied=context_constraint_satisfied,
+            semantic_boundary_aligned=truncation == "semantic_loss_aware",
+            original_message_indices=()
+            if truncation != "semantic_loss_aware"
+            else semantic.original_message_indices,
+            retained_message_indices=()
+            if truncation != "semantic_loss_aware"
+            else semantic.retained_message_indices,
+            dropped_message_indices=()
+            if truncation != "semantic_loss_aware"
+            else tuple(
+                index
+                for index in semantic.original_message_indices
+                if index not in set(semantic.retained_message_indices)
+            ),
+            original_atomic_units=0
+            if truncation != "semantic_loss_aware"
+            else semantic.original_atomic_units,
+            retained_atomic_units=0
+            if truncation != "semantic_loss_aware"
+            else semantic.retained_atomic_units,
+            original_tool_atomic_units=0
+            if truncation != "semantic_loss_aware"
+            else semantic.original_tool_atomic_units,
+            retained_tool_atomic_units=0
+            if truncation != "semantic_loss_aware"
+            else semantic.retained_tool_atomic_units,
         )
 
     return TokenizedSample(

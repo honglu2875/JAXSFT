@@ -100,6 +100,10 @@ class Part:
             raise TypeError(f"{self.kind} part value must be a string")
         if not isinstance(self.tags, frozenset) or any(not isinstance(tag, str) for tag in self.tags):
             raise TypeError("Part.tags must be a frozenset of strings")
+        for name in ("call_id", "tool_name"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ValueError(f"Part.{name} must be a non-empty string when present")
 
 
 @dataclass(frozen=True)
@@ -115,6 +119,10 @@ class Message:
             raise ValueError(f"unsupported role {self.role!r}")
         if not isinstance(self.parts, tuple):
             raise TypeError("Message.parts must be a tuple")
+        for field_name in ("name", "call_id"):
+            value = getattr(self, field_name)
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ValueError(f"Message.{field_name} must be a non-empty string when present")
 
 
 @dataclass(frozen=True)

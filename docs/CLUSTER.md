@@ -41,6 +41,11 @@ updates, and proved a byte-identical tiny checkpoint resume. The host had no
 system `uv`; this motivated the content-addressed controller bootstrap described
 below.
 
+A subsequent semantic-truncation gate materialized the pinned UltraChat split,
+completed three more full OLMo 2 updates, and exited cleanly after distributed
+shutdown. A follow-up synthetic run started from the empty lockfile left by the
+previous clean libtpu exit and proved the conservative preflight recovery path.
+
 The real run's first backward compile took about 101 seconds. A measured steady
 step took 0.403 seconds at 2,538 input tokens/s for length 256 and local batch
 four. This is a correctness smoke, not a benchmark: it uses replicated full
@@ -51,8 +56,11 @@ Checkpoint details are recorded separately in
 [docs/results/qwen35_v4_8_resume_smoke.json](results/qwen35_v4_8_resume_smoke.json).
 
 Operationally, TPU logs had to be directed to a writable run-local directory.
-A stale system lock file was removed only after confirming that no process held
-the accelerator; the launcher does not automate that privileged action.
+Before every launch, the controller requires `fuser`, refuses a live owner of
+the accelerator or lockfile, validates that an existing libtpu lock is a
+regular non-symlink zero-byte file, and only then unlinks it. This handles the
+empty lockfile left by a clean libtpu exit without broad or privileged process
+cleanup.
 
 ## 2. Controller modes
 
@@ -162,6 +170,8 @@ that a later edit mutates a running job.
 - Each worker writes an early rank handshake and a run-specific PID file.
 - TPU logs and temporary files are directed to writable paths inside the exact
   immutable run directory.
+- A preflight refuses an active TPU/lock owner and safely recovers only an
+  unowned empty `/tmp/libtpu_lockfile`.
 - All ranks validate the same source/config hashes before compilation.
 
 ### Monitor and collect
@@ -180,6 +190,10 @@ that a later edit mutates a running job.
 2. Wait a bounded grace period and collect last logs/checkpoint status.
 3. Escalate only the same recorded PIDs/process groups.
 4. Report any unreachable host or surviving exact PID.
+
+The implemented controller uses a 15-second default grace period (configurable
+with `--grace-seconds`), re-reads the command line after that wait, and sends
+SIGKILL only if the PID still belongs to the same immutable run.
 
 Do not use `pkill python`, substring-only job matching, or a kill command that
 can affect another run.

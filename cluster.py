@@ -402,6 +402,25 @@ def _remote_uv_upload_command(host: str, remote_uv: PurePosixPath, digest: str) 
     )
 
 
+def _remote_libtpu_preflight_command() -> str:
+    """Reject an active TPU owner and remove only an unowned empty lockfile."""
+
+    lockfile = "/tmp/libtpu_lockfile"
+    accelerator = "/dev/accel0"
+    return (
+        "set -eu; command -v fuser >/dev/null 2>&1 || "
+        "{ echo 'fuser is required for safe libtpu lock recovery' >&2; exit 43; }; "
+        f"if test -e {accelerator} && fuser {accelerator} >/dev/null 2>&1; then "
+        "echo 'TPU device already has an owner' >&2; exit 44; fi; "
+        f"if test -e {lockfile} || test -L {lockfile}; then "
+        f"test -f {lockfile} && test ! -L {lockfile} && test ! -s {lockfile} || "
+        "{ echo 'refusing unsafe libtpu lock recovery' >&2; exit 45; }; "
+        f"if fuser {lockfile} >/dev/null 2>&1; then "
+        "echo 'libtpu lockfile still has an owner' >&2; exit 46; fi; "
+        f"unlink {lockfile}; fi"
+    )
+
+
 def run_remote(profile: ClusterProfile, args: argparse.Namespace) -> int:
     state = load_state(profile, args.run_id)
     recipe = _recipe_relative(args.recipe)
@@ -476,6 +495,7 @@ def run_remote(profile: ClusterProfile, args: argparse.Namespace) -> int:
         for rank, host in enumerate(profile.hosts):
             print(f"[{host}] bootstrap uv: {local_uv} -> {remote_uv} (sha256={uv_digest})")
             print(f"[{host}] prepare: {prepare}")
+            print(f"[{host}] libtpu preflight: {_remote_libtpu_preflight_command()}")
             print(f"[{host}] launch:  {launch_command(rank)}")
         return 0
     def bootstrap_uv(host: str) -> subprocess.CompletedProcess:
@@ -494,6 +514,11 @@ def run_remote(profile: ClusterProfile, args: argparse.Namespace) -> int:
     _check_results(bootstrapped, "uv bootstrap")
     prepared = _parallel(profile.hosts, lambda host: _ssh(profile, host, prepare, timeout=1800))
     _check_results(prepared, "dependency preparation")
+    preflighted = _parallel(
+        profile.hosts,
+        lambda host: _ssh(profile, host, _remote_libtpu_preflight_command(), timeout=30),
+    )
+    _check_results(preflighted, "libtpu preflight")
     launched = _parallel(
         profile.hosts,
         lambda host: _ssh(profile, host, launch_command(profile.hosts.index(host)), timeout=30),
@@ -538,6 +563,9 @@ def status(profile: ClusterProfile, args: argparse.Namespace) -> int:
 def stop(profile: ClusterProfile, args: argparse.Namespace) -> int:
     state = load_state(profile, args.run_id)
     remote_run = PurePosixPath(state.remote_run_dir)
+    grace_seconds = int(args.grace_seconds)
+    if not 0 <= grace_seconds <= 300:
+        raise ClusterError("--grace-seconds must be in [0, 300]")
 
     def command(rank: int) -> str:
         pid_file = remote_run / f"rank-{rank:03d}.pid"
@@ -547,7 +575,14 @@ def stop(profile: ClusterProfile, args: argparse.Namespace) -> int:
             f"case \"$pid\" in (*[!0-9]*|'') exit 41;; esac; "
             f"cmd=$(tr '\\000' ' ' < /proc/\"$pid\"/cmdline 2>/dev/null || true); "
             f"case \"$cmd\" in (*{shlex.quote(marker)}*) ;; (*) echo 'PID command does not match this run' >&2; exit 42;; esac; "
-            f"kill -TERM \"$pid\""
+            f"kill -TERM \"$pid\"; remaining={grace_seconds}; "
+            "while kill -0 \"$pid\" 2>/dev/null && test \"$remaining\" -gt 0; do "
+            "sleep 1; remaining=$((remaining - 1)); done; "
+            "if kill -0 \"$pid\" 2>/dev/null; then "
+            "cmd=$(tr '\\000' ' ' < /proc/\"$pid\"/cmdline 2>/dev/null || true); "
+            f"case \"$cmd\" in (*{shlex.quote(marker)}*) ;; "
+            "(*) echo 'PID command changed during stop grace period' >&2; exit 47;; esac; "
+            "kill -KILL \"$pid\"; printf 'forced=1\\n'; else printf 'forced=0\\n'; fi"
         )
 
     if args.dry_run:
@@ -556,10 +591,19 @@ def stop(profile: ClusterProfile, args: argparse.Namespace) -> int:
         return 0
     results = _parallel(
         profile.hosts,
-        lambda host: _ssh(profile, host, command(profile.hosts.index(host)), timeout=30),
+        lambda host: _ssh(
+            profile,
+            host,
+            command(profile.hosts.index(host)),
+            timeout=max(30, grace_seconds + 15),
+        ),
     )
     _check_results(results, "stop")
-    print(f"sent SIGTERM to exact recorded PID on {len(profile.hosts)} hosts")
+    forced = sum(b"forced=1" in result.stdout for result in results.values())
+    print(
+        f"stopped exact recorded PID on {len(profile.hosts)} hosts "
+        f"({forced} required SIGKILL after {grace_seconds}s grace)"
+    )
     return 0
 
 
@@ -617,6 +661,8 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--synthetic", action="store_true")
             command.add_argument("--synthetic-length", type=int, default=32)
             command.add_argument("--synthetic-vocab-size", type=int, default=128)
+        elif name == "stop":
+            command.add_argument("--grace-seconds", type=int, default=15)
         command.set_defaults(function=function)
     return result
 

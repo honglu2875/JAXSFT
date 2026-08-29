@@ -8,7 +8,10 @@ The repository spine and first executable vertical slice now exist. Completed:
   recipe, structured run artifacts, and controller lifecycle;
 - canonical messages/parts/tools, four source adapter families, exact Qwen3.5
   text rendering, whole-sequence offset alignment, selector-based weights, and
-  loss-aware truncation with an explicit context budget;
+  token-window and complete-message/tool-atomic loss-aware truncation with an
+  explicit context budget;
+- explicit streaming/materialized Hub loading with loading-mode-bound replay
+  state and conservative stale-libtpu-lock recovery in the controller;
 - a single-file dense Qwen3.5 text model, direct safetensors map, weighted loss,
   AdamW, one-/four-device CPU smoke, deterministic single-process resume, and
   optional Hugging Face parity tests;
@@ -31,10 +34,9 @@ loss-aware recipe then emitted 20 samples from 22 rows with no zero-objective
 truncation drops, compared with 28 rows and six drops for the right-truncation
 smoke. All 19 truncated emitted samples retained the configured 32-token
 context budget. The original four-host slice was pre-empted, so multi-host
-startup and portable checkpointing remain open. Packing,
-complete-turn/tool-boundary truncation,
-high-performance chunkwise DeltaNet, model-axis sharding, and Kimi remain
-planned work rather than advertised support.
+startup and portable checkpointing remain open. Packing, high-performance
+chunkwise DeltaNet, model-axis sharding, and Kimi remain planned work rather
+than advertised support.
 
 The next model-breadth gate is also complete: pinned
 `allenai/OLMo-2-0425-1B` loaded all 179 tensors (1,484,916,736 parameters), and
@@ -44,6 +46,22 @@ full-parameter updates on a v4-8 with finite metrics. A tiny OLMo interrupted
 run cold-resumed to a byte-identical final checkpoint. OLMo's pinned template
 does not represent tools or reasoning, so those samples fail explicitly rather
 than losing metadata.
+
+The next data/objective gate is complete as well. `semantic_loss_aware` chooses
+only complete-message windows, validates unique call/result links, keeps each
+chained tool transaction plus final assistant answer indivisible, and retains a
+tool-definition preamble whenever a tool exchange survives. A pinned,
+materialized UltraChat run completed three OLMo 2 updates on four local v4
+devices, emitted 12 semantically truncated samples with zero zero-objective
+drops, recorded three oversized semantic-unit rejections and seven explicit
+context relaxations, shut down JAX in 5 ms, and exited normally. A subsequent
+synthetic launch proved that the controller can recover an unowned empty
+libtpu lock without privileged or broad process cleanup. The hostname-free
+record is `docs/results/olmo2_1b_v4_8_semantic_smoke.json`.
+Direct remote parquet streaming remains experimental under the frozen data
+stack: training/result emission succeeds, but repeated v4-8 checks reproduced a
+PyArrow/Hugging Face HTTP finalizer wait after JAX shutdown. Materialized mode
+is the validated lifecycle until that upstream boundary is replaced or fixed.
 
 ## 1. Outcome
 

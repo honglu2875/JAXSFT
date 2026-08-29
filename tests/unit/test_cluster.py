@@ -75,6 +75,7 @@ def test_launch_dry_run_carries_capsule_identity(tmp_path, monkeypatch, capsys):
     assert "bootstrap uv:" in output
     assert "/dev/shm/jaxsft-cache/bin/uv-" in output
     assert "TPU_LOG_DIR=/dev/shm/jaxsft-runs/fixture-run/tpu-logs" in output
+    assert "libtpu preflight:" in output
 
 
 def test_synthetic_cluster_launch_forwards_shape_flags(tmp_path, monkeypatch, capsys):
@@ -110,3 +111,34 @@ def test_uv_bootstrap_uses_probe_before_uploading_controller_bytes():
     assert "cat >" not in probe
     assert "cat >" in upload
     assert "uv-deadbeef.tmp-worker-0.example.internal" in upload
+
+
+def test_libtpu_preflight_is_conservative_and_recoverable():
+    command = cluster._remote_libtpu_preflight_command()
+    assert "fuser /dev/accel0" in command
+    assert "fuser /tmp/libtpu_lockfile" in command
+    assert "test -e /tmp/libtpu_lockfile || test -L /tmp/libtpu_lockfile" in command
+    assert "test ! -L /tmp/libtpu_lockfile" in command
+    assert "test ! -s /tmp/libtpu_lockfile" in command
+    assert "unlink /tmp/libtpu_lockfile" in command
+    assert "rm " not in command
+
+
+def test_stop_dry_run_stages_term_then_exact_kill(tmp_path, monkeypatch, capsys):
+    profile = cluster.load_profile(PROFILE)
+    monkeypatch.setattr(cluster, "STATE_ROOT", tmp_path)
+    state = cluster.RunState(
+        run_id="stop-fixture",
+        source_sha256="c" * 64,
+        remote_run_dir="/dev/shm/jaxsft-runs/stop-fixture",
+        hosts=profile.hosts,
+    )
+    cluster.save_state(profile, state)
+    arguments = Namespace(run_id="stop-fixture", dry_run=True, grace_seconds=7)
+
+    assert cluster.stop(profile, arguments) == 0
+    output = capsys.readouterr().out
+    assert "kill -TERM" in output
+    assert "remaining=7" in output
+    assert "kill -KILL" in output
+    assert output.count("/dev/shm/jaxsft-runs/stop-fixture/source/train_sft.py") == 8

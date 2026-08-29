@@ -267,22 +267,36 @@ Every policy declares handling of dangling tool calls/results, incomplete
 reasoning/final pairs, BOS/EOS, and minimum selected tokens. Statistics and the
 pre/post sample IDs are recorded. Silent hard slicing is not a default.
 
-The implemented token-window baseline exposes `reject`, `right`, `left`, and
-`loss_aware`. `loss_aware` evaluates every fixed-length window after the loss
-policy has assigned weights. It maximizes retained objective weight while
-accounting for the fact that the first retained causal token cannot be scored;
-ties prefer the later target chunk and then the largest available prefix
-context. `training.truncation_min_context_tokens` can reserve a minimum number
-of tokens before the first retained target. If no window can satisfy that
-constraint, the run records a relaxation rather than silently pretending it
-was met.
+The implementation exposes `reject`, `right`, `left`, `loss_aware`, and
+`semantic_loss_aware`. `loss_aware` evaluates every fixed-length token window
+after the loss policy has assigned weights. It maximizes retained objective
+weight while accounting for the fact that the first retained causal token
+cannot be scored; ties prefer the later target chunk and then the largest
+available prefix context.
+
+`semantic_loss_aware` applies the same objective-aware selection only to
+contiguous windows whose start/end align with complete rendered-message
+boundaries. An assistant tool-call message, all consecutive tool results,
+chained calls, and the immediate final assistant response form one indivisible
+atomic unit. Calls and results require unique, matching call IDs; missing,
+duplicate, dangling, or unknown links are rejected. If the rendered document
+contains a tool-definition preamble, a retained tool exchange must retain that
+preamble too. An objective-bearing message/tool unit or dependency closure
+larger than `max_length` is counted as a semantic truncation rejection rather
+than token-sliced. The record lists original, retained, and dropped message
+indices plus original/retained atomic and tool-unit counts.
+
+For both loss-aware policies, `training.truncation_min_context_tokens` can
+reserve a minimum number of tokens before the first retained target. If no
+eligible window can satisfy that constraint, the run records a relaxation
+rather than silently pretending it was met.
 
 Every truncated sample carries its original/window lengths, original/retained
 selected-token counts and objective weight, retained context, and constraint
-status. Stream totals expose the same losses. This makes the policy suitable
-for objective-aware experiments, but it can still cut through a semantic turn
-or tool transaction. Complete-turn/tool-boundary policies remain a separate
-contract, not an implicit behavior of `loss_aware`.
+status. Stream totals expose the same losses. Plain `loss_aware` can still cut
+through a semantic turn or tool transaction; `semantic_loss_aware` makes the
+stronger boundary behavior an explicit recipe choice rather than changing the
+meaning of an existing experiment.
 
 ## 10. Packing and attention
 
@@ -307,6 +321,17 @@ A data source is pinned by Hub/local identity, revision, config, split, and file
 manifest. A mixer defines source weights/quotas, exhaustion behavior, shuffle
 seeds/buffer sizes, and curriculum schedule.
 
+The implemented Hub loader makes access mode explicit. `streaming` uses the
+pinned remote iterable plus a deterministic shuffle buffer; `materialized`
+downloads/builds the pinned split in the configured content-addressed cache,
+then shuffles its local Arrow indices. The latter removes remote parquet I/O
+from the training process and is the default choice for bounded correctness
+smokes when local capacity is known. Loading mode is part of recipe identity,
+the run manifest, and replay state; resume under a different mode is rejected.
+On the frozen dependency stack, remote parquet streaming has repeatedly emitted
+complete results and then lingered in PyArrow/Hugging Face HTTP finalization;
+it is exposed for research but is not currently a clean-lifecycle gate.
+
 Global sample order is logical and deterministic. Each JAX process receives a
 disjoint rank-local slice based on `jax.process_index()` and process count.
 Resume state includes each source cursor, shuffle-buffer state or reproducible
@@ -316,9 +341,9 @@ Changing process count on resume is rejected initially. Elastic resharding may
 be added later only with an explicit order-preservation contract.
 
 For streaming Hub datasets, immutable file/shard identities are resolved before
-training. If the upstream API cannot make exact resume practical, preprocess to
-content-addressed local Parquet/token shards rather than claiming deterministic
-streaming resume.
+training. If the upstream API cannot make exact resume or clean resource
+ownership practical, use `materialized` or preprocess to content-addressed
+local Parquet/token shards rather than claiming stronger streaming behavior.
 
 ## 12. Data artifact layers
 

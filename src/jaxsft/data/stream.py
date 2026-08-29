@@ -11,7 +11,13 @@ import numpy as np
 from ..config import DataSpec
 from .adapters import AdapterContext, AdapterError, get_adapter
 from .render import get_renderer
-from .tokenize import LossPolicy, TokenizerSnapshot, padded_arrays, tokenize_document
+from .tokenize import (
+    LossPolicy,
+    SemanticTruncationError,
+    TokenizerSnapshot,
+    padded_arrays,
+    tokenize_document,
+)
 
 
 @dataclass
@@ -22,11 +28,15 @@ class StreamCounters:
     adapter_errors: int = 0
     adapter_errors_by_reason: dict[str, int] = field(default_factory=dict)
     length_rejections: int = 0
+    semantic_truncation_rejections: int = 0
     zero_objective: int = 0
     truncated_samples: int = 0
+    semantic_truncated_samples: int = 0
     tokens_truncated: int = 0
     selected_tokens_truncated: int = 0
     selected_weight_truncated: float = 0.0
+    messages_truncated: int = 0
+    tool_atomic_units_retained: int = 0
     context_constraint_relaxations: int = 0
     epochs: int = 0
 
@@ -71,7 +81,8 @@ class InstructionBatchStream:
     def close(self) -> None:
         """Release any open Arrow/HTTP resources owned by the iterable."""
 
-        close = getattr(self._iterator, "close", None)
+        iterator, self._iterator = self._iterator, iter(())
+        close = getattr(iterator, "close", None)
         if callable(close):
             close()
 
@@ -79,8 +90,9 @@ class InstructionBatchStream:
         """Return a replayable rank-local cursor for the pinned iterable."""
 
         return {
-            "schema_version": 2,
-            "kind": "huggingface_stream_replay",
+            "schema_version": 3,
+            "kind": "huggingface_replay",
+            "loading_mode": self.spec.loading_mode,
             "process_index": self.process_index,
             "process_count": self.process_count,
             "tokenizer_hash": self.snapshot.identity_hash,
@@ -90,12 +102,22 @@ class InstructionBatchStream:
     def load_state_dict(self, raw: Mapping[str, Any]) -> None:
         """Restore by deterministically replaying the current epoch's prefix."""
 
-        allowed = {"schema_version", "kind", "process_index", "process_count", "tokenizer_hash", "counters"}
+        allowed = {
+            "schema_version",
+            "kind",
+            "loading_mode",
+            "process_index",
+            "process_count",
+            "tokenizer_hash",
+            "counters",
+        }
         unknown = set(raw) - allowed
         if unknown:
             raise ValueError(f"unknown stream-state keys: {sorted(unknown)}")
-        if raw.get("schema_version") != 2 or raw.get("kind") != "huggingface_stream_replay":
+        if raw.get("schema_version") != 3 or raw.get("kind") != "huggingface_replay":
             raise ValueError("unsupported instruction stream state")
+        if raw.get("loading_mode") != self.spec.loading_mode:
+            raise ValueError("stream checkpoint loading_mode differs from this run")
         if int(raw.get("process_index", -1)) != self.process_index:
             raise ValueError("stream checkpoint process_index differs from this process")
         if int(raw.get("process_count", -1)) != self.process_count:
@@ -118,11 +140,15 @@ class InstructionBatchStream:
             adapter_errors=int(counters_raw["adapter_errors"]),
             adapter_errors_by_reason={str(key): int(value) for key, value in reasons.items()},
             length_rejections=int(counters_raw["length_rejections"]),
+            semantic_truncation_rejections=int(counters_raw["semantic_truncation_rejections"]),
             zero_objective=int(counters_raw["zero_objective"]),
             truncated_samples=int(counters_raw["truncated_samples"]),
+            semantic_truncated_samples=int(counters_raw["semantic_truncated_samples"]),
             tokens_truncated=int(counters_raw["tokens_truncated"]),
             selected_tokens_truncated=int(counters_raw["selected_tokens_truncated"]),
             selected_weight_truncated=float(counters_raw["selected_weight_truncated"]),
+            messages_truncated=int(counters_raw["messages_truncated"]),
+            tool_atomic_units_retained=int(counters_raw["tool_atomic_units_retained"]),
             context_constraint_relaxations=int(counters_raw["context_constraint_relaxations"]),
             epochs=int(counters_raw["epochs"]),
         )
@@ -132,11 +158,15 @@ class InstructionBatchStream:
             counters.rows_emitted,
             counters.adapter_errors,
             counters.length_rejections,
+            counters.semantic_truncation_rejections,
             counters.zero_objective,
             counters.truncated_samples,
+            counters.semantic_truncated_samples,
             counters.tokens_truncated,
             counters.selected_tokens_truncated,
             counters.selected_weight_truncated,
+            counters.messages_truncated,
+            counters.tool_atomic_units_retained,
             counters.context_constraint_relaxations,
             counters.epochs,
             *counters.adapter_errors_by_reason.values(),
@@ -151,6 +181,7 @@ class InstructionBatchStream:
             counters.rows_emitted
             + counters.adapter_errors
             + counters.length_rejections
+            + counters.semantic_truncation_rejections
             + counters.zero_objective
         )
         if classified_rows != counters.rows_seen:
@@ -180,9 +211,15 @@ class InstructionBatchStream:
             name=self.spec.config,
             split=self.spec.split,
             revision=self.spec.revision,
-            streaming=True,
+            streaming=self.spec.loading_mode == "streaming",
         )
-        dataset = dataset.shuffle(seed=self.spec.shuffle_seed + epoch, buffer_size=self.spec.shuffle_buffer_size)
+        if self.spec.loading_mode == "streaming":
+            dataset = dataset.shuffle(
+                seed=self.spec.shuffle_seed + epoch,
+                buffer_size=self.spec.shuffle_buffer_size,
+            )
+        else:
+            dataset = dataset.shuffle(seed=self.spec.shuffle_seed + epoch)
         dataset = split_dataset_by_node(dataset, rank=self.process_index, world_size=self.process_count)
         return iter(dataset)
 
@@ -229,6 +266,9 @@ class InstructionBatchStream:
                     self.counters.adapter_errors_by_reason.get(reason, 0) + 1
                 )
                 continue
+            except SemanticTruncationError:
+                self.counters.semantic_truncation_rejections += 1
+                continue
             except ValueError as error:
                 if "exceeding max_length" in str(error):
                     self.counters.length_rejections += 1
@@ -242,6 +282,10 @@ class InstructionBatchStream:
                     truncation.original_selected_tokens - truncation.retained_selected_tokens
                 )
                 self.counters.selected_weight_truncated += truncation.original_weight - truncation.retained_weight
+                if truncation.semantic_boundary_aligned:
+                    self.counters.semantic_truncated_samples += 1
+                    self.counters.messages_truncated += len(truncation.dropped_message_indices)
+                    self.counters.tool_atomic_units_retained += truncation.retained_tool_atomic_units
                 if not truncation.context_constraint_satisfied:
                     self.counters.context_constraint_relaxations += 1
             if tokenized.selected_tokens == 0:

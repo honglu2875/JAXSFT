@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "model": {
+    "architecture": "olmo2",
+    "repo_id": "allenai/OLMo-2-0425-1B",
+    "revision": "a1847dff35000b4271fa70afc5db10fd29fedbdf",
+    "parameter_count": 1484916736,
+    "training_dtype": "bfloat16"
+  },
+  "data": {
+    "repo_id": "HuggingFaceH4/ultrachat_200k",
+    "revision": "8049631c405ae6576f93f445c6b8166f76f5505a",
+    "config": "default",
+    "split": "train_sft",
+    "adapter": "ultrachat_200k",
+    "loading_mode": "materialized",
+    "materialized_train_rows": 207865,
+    "renderer": "olmo2_instruct",
+    "renderer_template_revision": "48d788eca847d4d7548f375ad03d3c9312f6139e",
+    "tokenizer_identity_sha256": "6049ea77fe1039acf27aceed4664bdd4e22b9c223f87ec0aed6ffb0bcdea141a"
+  },
+  "recipe": {
+    "path": "configs/recipes/olmo2_1b_ultrachat_semantic_smoke.yaml",
+    "file_sha256": "234c9dd1105099d401ec1073cb83d550c0962518c4f907b12f26d630325c794f",
+    "identity_sha256": "335d861c17a28528647833c448bd5c6d583ab64542d971a754d995bea608ddbc",
+    "max_length": 256,
+    "truncation": "semantic_loss_aware",
+    "truncation_min_context_tokens": 32,
+    "steps": 3,
+    "per_device_batch_size": 1
+  },
+  "source": {
+    "kind": "source_capsule",
+    "sha256": "8bef8d23b8a6e9fd42908dee4caa632763de81201bb79570fe30f6dc1ce7ffc3"
+  },
+  "topology": {
+    "backend": "tpu",
+    "accelerator_type": "v4-8",
+    "process_count": 1,
+    "local_device_count": 4,
+    "global_device_count": 4
+  },
+  "training_steps": [
+    {
+      "step": 1,
+      "loss": 2.119795560836792,
+      "loss_numerator": 1719.154296875,
+      "loss_denominator": 811.0,
+      "selected_accuracy": 0.521578311920166,
+      "gradient_norm": 6.720495700836182,
+      "input_tokens": 893.0,
+      "seconds": 3.1102982508018613,
+      "tokens_per_second": 287.11072958028285
+    },
+    {
+      "step": 2,
+      "loss": 2.0378477573394775,
+      "loss_numerator": 1391.8499755859375,
+      "loss_denominator": 683.0,
+      "selected_accuracy": 0.5607613325119019,
+      "gradient_norm": 8.438633918762207,
+      "input_tokens": 879.0,
+      "seconds": 2.6301664700731635,
+      "tokens_per_second": 334.1993786330752
+    },
+    {
+      "step": 3,
+      "loss": 1.8113764524459839,
+      "loss_numerator": 950.97265625,
+      "loss_denominator": 525.0,
+      "selected_accuracy": 0.5904761552810669,
+      "gradient_norm": 8.576531410217285,
+      "input_tokens": 728.0,
+      "seconds": 0.11694515310227871,
+      "tokens_per_second": 6225.140424274794
+    }
+  ],
+  "stream_counters": {
+    "rows_seen": 17,
+    "rows_emitted": 12,
+    "adapter_errors": 2,
+    "semantic_truncation_rejections": 3,
+    "length_rejections": 0,
+    "zero_objective": 0,
+    "truncated_samples": 12,
+    "semantic_truncated_samples": 12,
+    "messages_truncated": 40,
+    "tokens_truncated": 8530,
+    "selected_tokens_truncated": 3432,
+    "selected_weight_truncated": 3432.0,
+    "tool_atomic_units_retained": 0,
+    "context_constraint_relaxations": 7
+  },
+  "lifecycle": {
+    "result_status": "complete",
+    "worker_state_after_completion": "exited",
+    "wall_seconds": 6.085723171941936,
+    "distributed_shutdown_seconds": 0.005070830695331097,
+    "post_exit_tpu_device_owners": 0,
+    "result_json_sha256": "521ebbab47e06e23e86a69eb3587e97fe68d6384e424b3550de77d6a03d08318",
+    "manifest_json_sha256": "3f6bf50c5e89f1665980724f8e43c663ab26c262e696fadd86da6c44754dbc2f",
+    "topology_json_sha256": "d84c8a5a48d037f1de21b7f168f09bc52bdb08f710e6c78aa9862b729a174759",
+    "rank_log_sha256": "8afd65c13f06348f9361277d4c2962d8118688181c7cf43c20734e80410543c2"
+  },
+  "controller_libtpu_preflight_smoke": {
+    "source_capsule_sha256": "afaf7fc0aa878953f6ac57ba48ca96c22cafed93776211b4623a0f95d7c759a0",
+    "stale_lock_before_launch": "regular, zero-byte, and unowned",
+    "manual_lock_removal_before_launch": false,
+    "synthetic_length": 24,
+    "synthetic_vocab_size": 96,
+    "devices": 4,
+    "steps": 3,
+    "status": "complete",
+    "worker_state_after_completion": "exited",
+    "result_json_sha256": "6824b99be974852c2d79df765a6dde337771fabb56e1444f9ee5e284588d74aa"
+  },
+  "notes": [
+    "Step timings include compilation, cache, and asynchronous-runtime effects and are smoke evidence, not a benchmark.",
+    "UltraChat contains no tool calls, so tool_atomic_units_retained is zero; linked multi-call/result/final-answer atomicity is covered by offline adversarial fixtures.",
+    "Seven context-budget relaxations are explicit; every emitted sample retained objective tokens and no message or tool unit was token-sliced.",
+    "Materializing the pinned dataset removed remote parquet I/O from the training lifecycle; direct remote parquet streaming is experimental because the frozen stack can linger during HTTP finalization after emitting a complete result.",
+    "Parameters and FP32 Adam moments were replicated on each of four local devices; model-axis sharding was not used."
+  ]
+}
