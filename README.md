@@ -24,17 +24,22 @@ immutable in the checked-in recipe.
   target shifting, and globally additive numerator/denominator reduction.
 - One visible `train_sft.py` loop with gradient accumulation, rematerialization,
   clipping, AdamW, cosine scheduling, rank-disjoint streaming data, structured
-  artifacts, and replicated multi-host data parallelism.
+  artifacts, replicated data parallelism, and strict checkpoint/resume.
 - Controller-only `cluster.py doctor|sync|run|status|stop|collect`, immutable
   source capsules, per-run remote directories, and exact recorded-PID teardown.
 - CPU tests, forced four-device CPU smoke, optional Transformers/PyTorch parity,
   and a frozen `uv.lock`.
 
-The initial validation gates pass for 25 offline unit tests, byte/token template
-parity, tiny-model valid-logit/loss/gradient parity against Transformers, a
-320-tensor load of the pinned 752,393,024-parameter public text checkpoint, a
-finite compiled public-weight forward pass, and one live pinned UltraChat batch.
-The real TPU update remains gated on access to the intended four hosts.
+The initial validation gates pass for 29 offline unit tests; byte/token template
+parity; tiny-model valid-logit/loss/gradient/AdamW-step parity against
+Transformers and PyTorch; and an exact 320-tensor,
+752,393,024-parameter public-checkpoint audit. A measured single-host v4-8 run
+completed five live UltraChat updates across four TPU devices with finite loss
+and gradients. The first backward compile took about 101 seconds; a measured
+steady step took 0.403 seconds (2,538 input tokens/s). See the
+[sanitized result](docs/results/qwen35_v4_8_smoke.json). The original four-host
+slice was pre-empted, so multi-host initialization and checkpoint portability
+remain unproven.
 
 ## Quick start
 
@@ -46,6 +51,15 @@ make check
 
 # Tiny hybrid Qwen3.5, synthetic data, CPU only.
 make smoke
+
+# Deterministic interruption/resume smoke; --stop-after-step is absolute.
+uv run python train_sft.py \
+  --config configs/recipes/qwen35_tiny_resume_smoke.yaml \
+  --synthetic --stop-after-step 2
+uv run python train_sft.py \
+  --config configs/recipes/qwen35_tiny_resume_smoke.yaml \
+  --synthetic \
+  --resume artifacts/qwen35-tiny-resume-smoke/checkpoints/step-00000002.pkl
 
 # Inspect the pinned production recipe without downloading weights.
 uv run python train_sft.py \
@@ -113,11 +127,14 @@ from token IDs. Every selected target token is aligned beside the token being
 predicted; global loss is `sum(weight * nll) / sum(weight)` across devices.
 
 The initial run deliberately uses a readable recurrent DeltaNet reference
-kernel and replicated parameters. Chunkwise TPU kernels, model-axis sharding,
-packing, exact streaming resume, portable optimizer checkpoints, LoRA, OLMo,
-Qwen MoE, and Kimi variants remain roadmap items. See [PLAN.md](PLAN.md) for
-their exit gates and [docs/DATA_CONTRACT.md](docs/DATA_CONTRACT.md) for the
-data/loss invariants.
+kernel and replicated parameters. Single-process checkpoints atomically capture
+the model, optimizer, step, RNG cursor, and a deterministically replayable data
+cursor; the loader verifies a completion marker, SHA-256, recipe identity, and
+topology before unpickling trusted local state. Chunkwise TPU kernels,
+model-axis sharding, packing, portable multi-host checkpoints, LoRA, OLMo, Qwen
+MoE, and Kimi variants remain roadmap items. See [PLAN.md](PLAN.md) for their
+exit gates and [docs/DATA_CONTRACT.md](docs/DATA_CONTRACT.md) for the data/loss
+invariants.
 
 ## References and license
 

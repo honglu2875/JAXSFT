@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "date_utc": "2026-08-29",
+  "purpose": "single-host correctness smoke; not a performance benchmark",
+  "source": {
+    "git_commit": "6c21e34d989abbcd693d8d9b228047bbe9df9bdc",
+    "capsule_sha256": "425a912d0ef296e0261367816ed6be73c093ec10a7a117c6a603836de10d1a8a"
+  },
+  "model": {
+    "repo_id": "Qwen/Qwen3.5-0.8B-Base",
+    "revision": "dc7cdfe2ee4154fa7e30f5b51ca41bfa40174e68",
+    "text_parameter_count": 752393024,
+    "loaded_text_tensors": 320
+  },
+  "data": {
+    "repo_id": "HuggingFaceH4/ultrachat_200k",
+    "revision": "8049631c405ae6576f93f445c6b8166f76f5505a",
+    "config": "default",
+    "split": "train_sft",
+    "rows_seen": 28,
+    "rows_emitted": 20,
+    "adapter_errors": 2,
+    "zero_objective_after_right_truncation": 6
+  },
+  "topology": {
+    "accelerator": "v4-8",
+    "process_count": 1,
+    "local_device_count": 4,
+    "global_device_count": 4,
+    "parameter_placement": "replicated"
+  },
+  "training": {
+    "steps": 5,
+    "sequence_length": 256,
+    "global_batch_size": 4,
+    "all_losses_finite": true,
+    "all_gradient_norms_finite": true,
+    "first_backward_compile_seconds_approx": 101.09,
+    "final_step": {
+      "loss": 1.3101739883422852,
+      "gradient_norm_before_clipping": 18.905839920043945,
+      "input_tokens": 1024,
+      "seconds": 0.4034285843372345,
+      "input_tokens_per_second": 2538.2435448451433
+    }
+  },
+  "diagnostics": [
+    "The two rejected rows had an UltraChat prompt that differed from the first user message.",
+    "The six zero-objective rows were right-truncated before any assistant target span.",
+    "Private host inventory and credentials are intentionally omitted."
+  ]
+}

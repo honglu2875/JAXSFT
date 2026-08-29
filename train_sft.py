@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.metadata
 import json
 import os
@@ -22,7 +23,7 @@ import numpy as np
 
 from jaxsft.config import Recipe, load_recipe
 from jaxsft.loss import causal_loss_statistics
-from jaxsft.optim import AdamWHyperparameters, adamw_init, adamw_update, cosine_learning_rate
+from jaxsft.optim import AdamWHyperparameters, AdamWState, adamw_init, adamw_update, cosine_learning_rate
 
 
 def _json_default(value: Any) -> Any:
@@ -55,8 +56,6 @@ def git_identity(root: Path) -> dict[str, Any]:
     head = run("rev-parse", "HEAD")
     status = run("status", "--porcelain=v1") or ""
     diff = run("diff", "--binary", "HEAD") if head else status
-    import hashlib
-
     return {
         "head": head,
         "dirty": bool(status),
@@ -127,18 +126,156 @@ def synthetic_batch(
     return {"input_ids": input_ids, "attention_mask": attention_mask, "loss_weights": loss_weights}
 
 
-def save_checkpoint(output_dir: Path, step: int, params: object, optimizer: object) -> None:
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def save_checkpoint(
+    output_dir: Path,
+    step: int,
+    params: object,
+    optimizer: object,
+    *,
+    recipe_identity_hash: str,
+    process_count: int,
+    data_state: dict[str, Any],
+    rng_state: dict[str, Any],
+) -> Path:
+    """Atomically write a trusted, replicated smoke checkpoint and marker."""
+
+    if step <= 0:
+        raise ValueError("checkpoint step must be positive")
+    if process_count != 1:
+        raise ValueError("replicated checkpoint format supports exactly one JAX process")
     checkpoint_dir = output_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     target = checkpoint_dir / f"step-{step:08d}.pkl"
+    marker_path = target.with_suffix(".complete.json")
+    if target.exists() or marker_path.exists():
+        raise FileExistsError(f"refusing to overwrite checkpoint or completion marker: {target}")
     temporary = target.with_name(target.name + f".tmp-{os.getpid()}")
-    host_state = jax.device_get({"schema_version": 1, "step": step, "params": params, "optimizer": optimizer})
-    with temporary.open("wb") as handle:
-        pickle.dump(host_state, handle, protocol=5)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, target)
-    atomic_json(target.with_suffix(".complete.json"), {"schema_version": 1, "step": step, "file": target.name})
+    host_state = jax.device_get(
+        {
+            "schema_version": 2,
+            "step": step,
+            "recipe_identity_hash": recipe_identity_hash,
+            "process_count": process_count,
+            "params": params,
+            "optimizer": optimizer,
+            "data_state": data_state,
+            "rng_state": rng_state,
+        }
+    )
+    try:
+        with temporary.open("xb") as handle:
+            pickle.dump(host_state, handle, protocol=5)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    atomic_json(
+        marker_path,
+        {
+            "schema_version": 2,
+            "step": step,
+            "file": target.name,
+            "sha256": _file_sha256(target),
+            "recipe_identity_hash": recipe_identity_hash,
+            "process_count": process_count,
+        },
+    )
+    return target
+
+
+def load_checkpoint(
+    path: str | Path, *, recipe_identity_hash: str, process_count: int
+) -> dict[str, Any]:
+    """Load a trusted local checkpoint after marker, hash, and identity checks."""
+
+    path = Path(path).expanduser().resolve()
+    marker_path = path.with_suffix(".complete.json")
+    if not path.is_file() or not marker_path.is_file():
+        raise FileNotFoundError(f"checkpoint and completion marker are required: {path}")
+    marker = json.loads(marker_path.read_text())
+    if not isinstance(marker, dict) or marker.get("schema_version") != 2:
+        raise ValueError("unsupported checkpoint completion marker")
+    if marker.get("file") != path.name:
+        raise ValueError("checkpoint marker names a different payload")
+    if marker.get("sha256") != _file_sha256(path):
+        raise ValueError("checkpoint SHA-256 does not match its completion marker")
+    if marker.get("recipe_identity_hash") != recipe_identity_hash:
+        raise ValueError("checkpoint recipe identity differs from this recipe")
+    if int(marker.get("process_count", -1)) != process_count:
+        raise ValueError("checkpoint process count differs from this run")
+    # Pickle is intentionally limited to checkpoints created and trusted by the
+    # same experiment. Never load an untrusted checkpoint path.
+    with path.open("rb") as handle:
+        payload = pickle.load(handle)
+    if not isinstance(payload, dict) or payload.get("schema_version") != 2:
+        raise ValueError("unsupported checkpoint payload")
+    if payload.get("recipe_identity_hash") != recipe_identity_hash:
+        raise ValueError("checkpoint payload recipe identity differs from this recipe")
+    if int(payload.get("process_count", -1)) != process_count:
+        raise ValueError("checkpoint payload process count differs from this run")
+    payload_step = int(payload.get("step", -1))
+    if payload_step < 0:
+        raise ValueError("checkpoint step must be non-negative")
+    if payload_step != int(marker.get("step", -2)):
+        raise ValueError("checkpoint payload and marker steps differ")
+    required = {"params", "optimizer", "data_state", "rng_state"}
+    if not required.issubset(payload):
+        raise ValueError(f"checkpoint is missing fields: {sorted(required - set(payload))}")
+    return payload
+
+
+def validate_optimizer_checkpoint(params: object, optimizer: object, *, expected_step: int) -> None:
+    """Validate optimizer structure without allocating another set of slots."""
+
+    if not isinstance(optimizer, AdamWState):
+        raise ValueError("checkpoint optimizer is not an AdamWState")
+    optimizer_step = np.asarray(jax.device_get(optimizer.step))
+    if optimizer_step.shape or int(optimizer_step) != expected_step:
+        raise ValueError("checkpoint optimizer step differs from checkpoint step")
+    parameter_structure = jax.tree.structure(params)
+    for name, moments in (
+        ("first_moment", optimizer.first_moment),
+        ("second_moment", optimizer.second_moment),
+    ):
+        if jax.tree.structure(moments) != parameter_structure:
+            raise ValueError(f"checkpoint {name} structure differs from parameters")
+        for index, (parameter, moment) in enumerate(zip(jax.tree.leaves(params), jax.tree.leaves(moments))):
+            if tuple(parameter.shape) != tuple(moment.shape):
+                raise ValueError(f"checkpoint {name} leaf {index} shape differs from parameters")
+
+
+def validate_rng_checkpoint(raw: object, *, seed: int, expected_step: int) -> None:
+    """Validate the explicit RNG cursor used by the currently deterministic trainer."""
+
+    if not isinstance(raw, dict) or set(raw) != {"schema_version", "model_init_seed", "next_training_step"}:
+        raise ValueError("checkpoint RNG state has unexpected fields")
+    if raw.get("schema_version") != 1:
+        raise ValueError("unsupported checkpoint RNG state")
+    if int(raw.get("model_init_seed", -1)) != seed:
+        raise ValueError("checkpoint model initialization seed differs from this recipe")
+    if int(raw.get("next_training_step", -1)) != expected_step:
+        raise ValueError("checkpoint RNG cursor differs from checkpoint step")
+
+
+def load_synthetic_cursor(raw: object, *, expected_step: int) -> int:
+    if not isinstance(raw, dict) or set(raw) != {"schema_version", "kind", "batches_consumed"}:
+        raise ValueError("synthetic data checkpoint has unexpected fields")
+    if raw.get("schema_version") != 1 or raw.get("kind") != "synthetic":
+        raise ValueError("unsupported synthetic data checkpoint")
+    batches_consumed = int(raw.get("batches_consumed", -1))
+    if batches_consumed != expected_step:
+        raise ValueError("synthetic batch cursor differs from checkpoint step")
+    return batches_consumed
 
 
 def make_train_step(model_config, training, optimizer_hparams):
@@ -234,15 +371,54 @@ def run(args: argparse.Namespace) -> int:
     if int(os.environ.get("JAXSFT_PROCESS_COUNT", process_count)) != process_count:
         raise RuntimeError("declared and initialized JAX process counts differ")
 
-    from jaxsft.models.qwen3_5 import init_params, load_hf_checkpoint, parameter_count, tiny_config
+    checkpoint_requested = bool(recipe.training.checkpoint_every or args.resume or args.stop_after_step is not None)
+    if process_count > 1 and checkpoint_requested:
+        raise RuntimeError(
+            "checkpoint/resume currently supports one JAX process (including multiple local devices); "
+            "portable multi-host checkpoints are not implemented"
+        )
+
+    restored = None
+    start_step = 0
+    if args.resume:
+        restored = load_checkpoint(
+            args.resume,
+            recipe_identity_hash=recipe.identity_hash,
+            process_count=process_count,
+        )
+        start_step = int(restored["step"])
+        validate_rng_checkpoint(restored["rng_state"], seed=recipe.run.seed, expected_step=start_step)
+    stop_step = recipe.training.steps if args.stop_after_step is None else args.stop_after_step
+    if not start_step < stop_step <= recipe.training.steps:
+        raise ValueError(
+            f"training interval must satisfy start_step < stop_step <= {recipe.training.steps}; "
+            f"got {start_step} < {stop_step}"
+        )
+
+    from jaxsft.models.qwen3_5 import (
+        Qwen35Config,
+        init_params,
+        load_hf_checkpoint,
+        parameter_count,
+        tiny_config,
+        validate_params,
+    )
 
     dtype = jnp.bfloat16 if recipe.model.dtype == "bfloat16" else jnp.float32
     stream = None
     if args.synthetic:
         model_config = tiny_config(vocab_size=args.synthetic_vocab_size)
-        params = init_params(jax.random.key(recipe.run.seed), model_config, dtype=jnp.float32)
+        params = (
+            init_params(jax.random.key(recipe.run.seed), model_config, dtype=jnp.float32)
+            if restored is None
+            else restored["params"]
+        )
+    elif restored is not None:
+        model_config = Qwen35Config.from_json(snapshot / "config.json")
+        params = restored["params"]
     else:
         model_config, params = load_hf_checkpoint(snapshot, dtype=dtype)
+    validate_params(params, model_config)
 
     output_override = os.environ.get("JAXSFT_OUTPUT_DIR")
     output_dir = Path(output_override or recipe.run.output_dir).expanduser().resolve()
@@ -275,7 +451,7 @@ def run(args: argparse.Namespace) -> int:
         if capsule_sha256:
             source_identity["capsule_sha256"] = capsule_sha256
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "recipe": recipe.public_dict(),
             "model": {"repo_id": recipe.model.repo_id, "revision": recipe.model.revision},
             "data": {"repo_id": recipe.data.repo_id, "revision": recipe.data.revision},
@@ -283,13 +459,22 @@ def run(args: argparse.Namespace) -> int:
             "topology": topology,
             "software": {"python": sys.version, "platform": platform.platform(), "packages": packages},
             "source": source_identity,
+            "resume": None
+            if args.resume is None
+            else {"checkpoint": str(Path(args.resume).expanduser().resolve()), "start_step": start_step},
+            "requested_stop_step": stop_step,
         }
         atomic_json(output_dir / "run-manifest.json", manifest)
 
     if args.synthetic:
+        synthetic_batches_consumed = (
+            0 if restored is None else load_synthetic_cursor(restored["data_state"], expected_step=start_step)
+        )
+
         def next_batch():
-            return synthetic_batch(
-                seed=recipe.run.seed,
+            nonlocal synthetic_batches_consumed
+            batch = synthetic_batch(
+                seed=recipe.run.seed + 1_000_003 * synthetic_batches_consumed,
                 process_index=process_index,
                 local_devices=local_device_count,
                 accumulation=recipe.training.gradient_accumulation_steps,
@@ -297,6 +482,15 @@ def run(args: argparse.Namespace) -> int:
                 length=min(recipe.training.max_length, args.synthetic_length),
                 vocab_size=model_config.vocab_size,
             )
+            synthetic_batches_consumed += 1
+            return batch
+
+        def current_data_state():
+            return {
+                "schema_version": 1,
+                "kind": "synthetic",
+                "batches_consumed": synthetic_batches_consumed,
+            }
 
         counters = None
     else:
@@ -317,8 +511,13 @@ def run(args: argparse.Namespace) -> int:
             max_length=recipe.training.max_length,
             truncation=recipe.training.truncation,
         )
+        if restored is not None:
+            stream.load_state_dict(restored["data_state"])
         next_batch = stream.next_batch
         counters = stream.counters
+
+        def current_data_state():
+            return stream.state_dict()
 
     optimizer_hparams = AdamWHyperparameters(
         beta1=recipe.training.beta1,
@@ -327,15 +526,19 @@ def run(args: argparse.Namespace) -> int:
         weight_decay=recipe.training.weight_decay,
         max_grad_norm=recipe.training.max_grad_norm,
     )
-    # Build optimizer slots independently on every replica; out_axes=None states
-    # that the result is replicated rather than adding a fake leading axis.
-    initialize_optimizer = jax.pmap(
-        lambda _replica, model_params: adamw_init(model_params),
-        in_axes=(0, None),
-        out_axes=None,
-        axis_name="data",
-    )
-    optimizer = initialize_optimizer(np.arange(local_device_count, dtype=np.int32), params)
+    if restored is None:
+        # Build optimizer slots independently on every replica; out_axes=None states
+        # that the result is replicated rather than adding a fake leading axis.
+        initialize_optimizer = jax.pmap(
+            lambda _replica, model_params: adamw_init(model_params),
+            in_axes=(0, None),
+            out_axes=None,
+            axis_name="data",
+        )
+        optimizer = initialize_optimizer(np.arange(local_device_count, dtype=np.int32), params)
+    else:
+        optimizer = restored["optimizer"]
+        validate_optimizer_checkpoint(params, optimizer, expected_step=start_step)
     train_step = jax.pmap(
         make_train_step(model_config, recipe.training, optimizer_hparams),
         axis_name="data",
@@ -351,8 +554,8 @@ def run(args: argparse.Namespace) -> int:
     try:
         first_batch = next_batch()
         multihost_utils.sync_global_devices("jaxsft-before-first-step")
-        for step_index in range(recipe.training.steps):
-            batch = first_batch if step_index == 0 else next_batch()
+        for step_index in range(start_step, stop_step):
+            batch = first_batch if step_index == start_step else next_batch()
             step_started = time.monotonic()
             params, optimizer, metrics = train_step(params, optimizer, batch)
             metrics["loss"].block_until_ready()
@@ -361,30 +564,49 @@ def run(args: argparse.Namespace) -> int:
             host_metrics["seconds"] = elapsed
             host_metrics["tokens_per_second"] = host_metrics["input_tokens"] / elapsed
             last_metrics = host_metrics
-            if step_index == 0 or (step_index + 1) % recipe.training.log_every == 0:
+            completed_step = step_index + 1
+            if step_index == start_step or completed_step % recipe.training.log_every == 0:
                 emit("train_step", rank=process_index, **host_metrics)
-            if (
+            cadence_checkpoint = bool(
                 recipe.training.checkpoint_every
-                and (step_index + 1) % recipe.training.checkpoint_every == 0
-                and process_index == 0
-            ):
-                save_checkpoint(output_dir, step_index + 1, params, optimizer)
-                emit("checkpoint", rank=process_index, step=step_index + 1)
+                and completed_step % recipe.training.checkpoint_every == 0
+            )
+            forced_stop_checkpoint = args.stop_after_step is not None and completed_step == stop_step
+            if (cadence_checkpoint or forced_stop_checkpoint) and process_index == 0:
+                checkpoint_path = save_checkpoint(
+                    output_dir,
+                    completed_step,
+                    params,
+                    optimizer,
+                    recipe_identity_hash=recipe.identity_hash,
+                    process_count=process_count,
+                    data_state=current_data_state(),
+                    rng_state={
+                        "schema_version": 1,
+                        "model_init_seed": recipe.run.seed,
+                        "next_training_step": completed_step,
+                    },
+                )
+                emit("checkpoint", rank=process_index, step=completed_step, path=checkpoint_path)
     finally:
         if stream is not None:
             stream.close()
 
     multihost_utils.sync_global_devices("jaxsft-finished")
+    status = "complete" if stop_step == recipe.training.steps else "stopped"
     result = {
-        "status": "complete",
+        "status": status,
         "rank": process_index,
-        "steps": recipe.training.steps,
+        "steps": stop_step,
+        "start_step": start_step,
+        "completed_steps": stop_step,
+        "target_steps": recipe.training.steps,
         "wall_seconds": time.monotonic() - started,
         "last_metrics": last_metrics,
         "stream_counters": None if counters is None else asdict(counters),
     }
     atomic_json(output_dir / f"rank-{process_index:03d}-result.json", result)
-    emit("complete", **result)
+    emit(status, **result)
     return 0
 
 
@@ -395,6 +617,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--synthetic", action="store_true", help="run the tiny Qwen3.5 model without Hub access")
     parser.add_argument("--synthetic-length", type=int, default=32)
     parser.add_argument("--synthetic-vocab-size", type=int, default=128)
+    parser.add_argument("--resume", help="trusted local step checkpoint to resume")
+    parser.add_argument(
+        "--stop-after-step",
+        type=int,
+        help="stop at this absolute completed step and write a checkpoint",
+    )
     return parser.parse_args(argv)
 
 

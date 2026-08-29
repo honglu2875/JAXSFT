@@ -266,6 +266,16 @@ supports it. A partial checkpoint is visible for diagnosis but never selected
 by automatic resume. Multi-host storage semantics must be proven by save,
 collection, cold restore, and one continued update.
 
+The implemented schema-v2 baseline is intentionally narrower than this target
+contract. For one JAX process (including several local devices), it stores
+parameters, AdamW moments/step, the recipe identity, process count, deterministic
+RNG cursor, and either a synthetic batch cursor or pinned Hugging Face iterable
+replay cursor. A SHA-256 completion marker is written last and checked before a
+trusted local pickle is opened. The current model has no dropout, so the RNG
+record is an explicit derivation cursor rather than serialized device PRNG
+state. Multi-process checkpointing fails closed until a portable shard/storage
+format is implemented.
+
 ## 9. Extension strategy
 
 The common path should remain boring. Research changes use one of four narrow

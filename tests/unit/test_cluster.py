@@ -1,3 +1,4 @@
+import subprocess
 import tarfile
 from argparse import Namespace
 from pathlib import Path
@@ -24,6 +25,16 @@ def test_run_id_rejects_path_like_values(value):
 
 
 def test_source_capsule_contains_research_code_and_excludes_generated_state():
+    repository = Path(__file__).parents[2]
+    worktree = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=repository,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if worktree.returncode:
+        pytest.skip("source capsule intentionally has no Git metadata")
     capsule, digest, files = cluster.make_capsule()
     try:
         assert len(digest) == 64

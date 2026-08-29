@@ -1,0 +1,51 @@
+schema_version: 1
+
+model:
+  architecture: qwen3_5
+  repo_id: Qwen/Qwen3.5-0.8B-Base
+  revision: dc7cdfe2ee4154fa7e30f5b51ca41bfa40174e68
+  dtype: bfloat16
+
+data:
+  repo_id: HuggingFaceH4/ultrachat_200k
+  revision: 8049631c405ae6576f93f445c6b8166f76f5505a
+  config: default
+  split: train_sft
+  adapter: ultrachat_200k
+  shuffle_seed: 17
+  shuffle_buffer_size: 10000
+
+objective:
+  conflict_mode: last_match
+  rules:
+    - name: explicit_default_zero
+      select: {}
+      weight: 0.0
+    - name: assistant_generated_tokens
+      select:
+        role: assistant
+        span_class: [content, reasoning, tool_call, tool_call_control, assistant_end]
+      weight: 1.0
+      require_match: true
+
+training:
+  max_length: 32
+  truncation: right
+  per_device_batch_size: 1
+  gradient_accumulation_steps: 1
+  steps: 4
+  peak_learning_rate: 2.0e-4
+  warmup_steps: 1
+  minimum_learning_rate_ratio: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  epsilon: 1.0e-8
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+  remat: true
+  log_every: 1
+  checkpoint_every: 2
+
+run:
+  seed: 17
+  output_dir: artifacts/qwen35-tiny-resume-smoke

@@ -11,6 +11,7 @@ import pytest
 from jaxsft.data.adapters import AdapterContext, messages_adapter
 from jaxsft.data.render import render_qwen3_5
 from jaxsft.models.qwen3_5 import Qwen35Config, convert_hf_state_dict, forward, tiny_config
+from jaxsft.optim import AdamWHyperparameters, adamw_init, adamw_update
 
 
 pytestmark = pytest.mark.parity
@@ -140,4 +141,44 @@ def test_tiny_forward_loss_and_gradient_match_transformers():
         reference.model.layers[1].mlp.up_proj.weight.grad.numpy().T,
         rtol=5e-4,
         atol=5e-4,
+    )
+
+    learning_rate = 3e-4
+    hyperparameters = AdamWHyperparameters(
+        beta1=0.9,
+        beta2=0.95,
+        epsilon=1e-8,
+        weight_decay=0.1,
+        max_grad_norm=1.0,
+    )
+    torch_gradient_norm = torch.nn.utils.clip_grad_norm_(reference.parameters(), hyperparameters.max_grad_norm)
+    torch_optimizer = torch.optim.AdamW(
+        reference.parameters(),
+        lr=learning_rate,
+        betas=(hyperparameters.beta1, hyperparameters.beta2),
+        eps=hyperparameters.epsilon,
+        weight_decay=hyperparameters.weight_decay,
+    )
+    torch_optimizer.step()
+    updated, _, jax_gradient_norm = adamw_update(
+        params,
+        gradients,
+        adamw_init(params),
+        learning_rate=learning_rate,
+        hyperparameters=hyperparameters,
+    )
+    np.testing.assert_allclose(
+        float(jax_gradient_norm),
+        float(torch_gradient_norm),
+        rtol=5e-5,
+        atol=5e-6,
+    )
+    # PyTorch decays every parameter by default; JAXSFT deliberately excludes
+    # one-dimensional norm/recurrence state. A matrix kernel has identical
+    # semantics and is the cross-framework optimizer-step oracle.
+    np.testing.assert_allclose(
+        np.asarray(updated["layers"][1]["mlp"]["up_proj"]),
+        reference.model.layers[1].mlp.up_proj.weight.detach().numpy().T,
+        rtol=5e-4,
+        atol=5e-5,
     )

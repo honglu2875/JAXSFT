@@ -9,17 +9,22 @@ The repository spine and first executable vertical slice now exist. Completed:
 - canonical messages/parts/tools, four source adapter families, exact Qwen3.5
   text rendering, whole-sequence offset alignment, and selector-based weights;
 - a single-file dense Qwen3.5 text model, direct safetensors map, weighted loss,
-  AdamW, one-/four-device CPU smoke, and optional Hugging Face parity tests;
-- pinned `Qwen/Qwen3.5-0.8B-Base` and UltraChat 200k smoke recipe.
+  AdamW, one-/four-device CPU smoke, deterministic single-process resume, and
+  optional Hugging Face parity tests;
+- pinned `Qwen/Qwen3.5-0.8B-Base` and UltraChat 200k smoke recipe;
+- a single-host v4-8 smoke using one JAX process and four local TPU devices.
 
-The Qwen renderer/tokenizer and tiny PyTorch valid-logit/loss/gradient parity
-gates pass. The pinned public checkpoint's 320 text tensors load with an exact
-752,393,024-parameter audit and complete a finite compiled forward pass; one
-live pinned UltraChat batch also traverses the full data/token/loss pipeline.
-The real four-host launch is blocked only at transport discovery: the requested
-names are unresolved and no target IPs are available here. Checkpoint/resume,
-packing, high-performance chunkwise DeltaNet, model-axis sharding, OLMo, and
-Kimi remain planned work rather than advertised support.
+The Qwen renderer/tokenizer and tiny PyTorch valid-logit/loss/gradient/optimizer
+parity gates pass. The pinned public checkpoint's 320 text tensors load with an
+exact 752,393,024-parameter audit. A v4-8 completed five live pinned UltraChat
+updates with finite loss/gradients; first backward compilation was about 101
+seconds and a measured steady step was 0.403 seconds (2,538 input tokens/s).
+Synthetic interruption at step 2 followed by a cold resume produced a
+byte-identical step-4 checkpoint to the uninterrupted run. The original
+four-host slice was pre-empted, so multi-host startup and portable checkpointing
+remain open. Packing, supervised-aware truncation, high-performance chunkwise
+DeltaNet, model-axis sharding, OLMo, and Kimi remain planned work rather than
+advertised support.
 
 ## 1. Outcome
 
@@ -319,7 +324,7 @@ default CPU gate flaky.
 | Packing creates cross-example attention or targets. | Carry pack segment IDs, block attention, reset positions by policy, and prove packed/unpacked loss invariance. |
 | Weighted loss is biased across hosts or accumulation microbatches. | Reduce numerator and denominator separately with `lax.psum`; never average local means. |
 | Hub data changes behind a branch name. | Resolve and record immutable dataset/model/tokenizer commits plus file hashes before a run. |
-| Streaming shuffle cannot resume exactly. | Store source shard order, buffer RNG/cursor, adapter version, and emitted sample counters; test interrupted iteration. |
+| Streaming shuffle cannot resume exactly. | The baseline pins revisions/dependencies and replays the rank-local epoch prefix from recorded counters; test exact interruption and retain buffer-state checkpointing as the scalable follow-up. |
 | Full PyTorch and JAX copies exceed host memory. | Use lazy safetensors conversion and preflight memory estimates; keep Torch construction in tiny parity tests. |
 | Large Kimi/GLM/Qwen MoE models do not fit the measured slice. | Separate architecture parity from full-checkpoint training support and publish explicit feasibility status. |
 | Multi-host checkpoint files land on non-shared local disks. | Make storage explicit; run save/collect/restore in M0; refuse long runs if restore is unproven. |
@@ -332,9 +337,10 @@ default CPU gate flaky.
 1. **Exact target names.** No official Hugging Face result matched the literal
    “Kimi 3.5 Flash” on 2026-08-29. Plausible intended targets include Kimi-K3,
    Kimi-K2.5/K2.6, Qwen3.5, GLM-4.7-Flash, or GLM-5.3-Flash.
-2. **Measured slice topology.** Confirm accelerator generation, chips/devices
-   per host, aggregate HBM, controller location, and whether worker 0 is the
-   current machine.
+2. **Measured multi-host topology.** A single v4-8 is measured as one process
+   with four local devices. Confirm accelerator generation, per-host device
+   counts, aggregate HBM, and coordinator reachability on the next four-host
+   slice.
 3. **Checkpoint/artifact storage.** Choose a shared mount/object store or approve
    collection of host-local shards after the M0 restore spike.
 4. **First optimization target.** Choose full-parameter SFT first (recommended

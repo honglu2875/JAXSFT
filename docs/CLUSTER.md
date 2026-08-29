@@ -11,18 +11,38 @@ measure those facts before a training profile is accepted.
 
 ### Controller audit, 2026-08-29
 
-The requested private short names and their standard GCE zonal-DNS forms do not
-resolve from the current controller. The controller can discover another
-four-worker TPU slice, but JAXSFT has deliberately not launched there. The
-controller's service account can identify its own instance but lacks the OAuth
-scope needed to list or describe the requested TPU through the Cloud TPU API. A
-local profile containing the four target IPs/resolvable SSH names (and an
-internally reachable coordinator name) is therefore the remaining launch
-prerequisite.
+The original four targets were unreachable and were then pre-empted. A
+replacement single-host TPU VM was supplied explicitly and tested, but it does
+not substitute for the four-process acceptance gate. A future local profile
+must contain four resolvable SSH targets plus a coordinator address reachable
+from every worker.
 
 The checked-in example is [configs/clusters/four-host-tpu.example.toml](../configs/clusters/four-host-tpu.example.toml).
 Operative inventory such as hostnames, IP addresses, and credentials belongs in
 an ignored `*.local.toml` profile and is not published with the source capsule.
+
+### Measured single-host v4-8 smoke, 2026-08-29
+
+The replacement VM reported one JAX process, four local/global TPU devices, 400
+GiB host RAM, and about 201 GiB of disposable `/dev/shm`. JAXSFT bootstrapped a
+frozen run-local environment without modifying system Python, verified the
+pinned Hugging Face cache, and passed:
+
+- a five-step 25,152-parameter synthetic update across all four devices;
+- a five-step, 752,393,024-parameter Qwen3.5/UltraChat SFT run with finite loss
+  and gradient norms;
+- artifact collection back to the controller.
+
+The real run's first backward compile took about 101 seconds. A measured steady
+step took 0.403 seconds at 2,538 input tokens/s for length 256 and local batch
+four. This is a correctness smoke, not a benchmark: it uses replicated full
+parameters and the readable sequential DeltaNet kernel. The public,
+hostname-free record is
+[docs/results/qwen35_v4_8_smoke.json](results/qwen35_v4_8_smoke.json).
+
+Operationally, TPU logs had to be directed to a writable run-local directory.
+A stale system lock file was removed only after confirming that no process held
+the accelerator; the launcher does not automate that privileged action.
 
 ## 2. Controller modes
 
@@ -185,9 +205,13 @@ the eventual durable checkpoint backend.
 
 ## 7. Checkpoint storage
 
-Portable multi-host checkpoint semantics remain an M3 blocker. The current
-trainer can gather a small replicated smoke state on rank 0, but the production
-contract requires one of:
+Portable multi-host checkpoint semantics remain an M3 blocker. The schema-v2
+baseline supports one JAX process, including multiple local devices, and
+explicitly rejects checkpoint/resume when `jax.process_count() > 1`. It writes
+parameters, AdamW state, step, RNG cursor, and data cursor to a temporary file,
+promotes it atomically, then writes a SHA-256 completion marker. Restore checks
+the marker, hash, recipe identity, and process count before loading trusted
+local pickle state. The production multi-host contract requires one of:
 
 1. a shared filesystem/object-store backend supported by the chosen checkpoint
    implementation;
@@ -198,7 +222,9 @@ contract requires one of:
 
 The selected path must survive a cold restore on all four hosts. A checkpoint
 written only to one worker's local disk is not called complete unless the model
-state was intentionally gathered there and validated.
+state was intentionally gathered there and validated. Hugging Face iterable
+resume currently replays the pinned rank-local epoch prefix, which is exact but
+linear in consumed rows; a captured shuffle-buffer cursor is the scaling path.
 
 ## 8. Testing without a real slice
 

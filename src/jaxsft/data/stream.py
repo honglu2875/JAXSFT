@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field
 from typing import Any, Iterator
 
 import numpy as np
@@ -16,8 +17,10 @@ from .tokenize import LossPolicy, TokenizerSnapshot, padded_arrays, tokenize_doc
 @dataclass
 class StreamCounters:
     rows_seen: int = 0
+    rows_seen_in_epoch: int = 0
     rows_emitted: int = 0
     adapter_errors: int = 0
+    adapter_errors_by_reason: dict[str, int] = field(default_factory=dict)
     length_rejections: int = 0
     zero_objective: int = 0
     epochs: int = 0
@@ -63,6 +66,89 @@ class InstructionBatchStream:
         if callable(close):
             close()
 
+    def state_dict(self) -> dict[str, Any]:
+        """Return a replayable rank-local cursor for the pinned iterable."""
+
+        return {
+            "schema_version": 1,
+            "kind": "huggingface_stream_replay",
+            "process_index": self.process_index,
+            "process_count": self.process_count,
+            "counters": asdict(self.counters),
+        }
+
+    def load_state_dict(self, raw: Mapping[str, Any]) -> None:
+        """Restore by deterministically replaying the current epoch's prefix."""
+
+        allowed = {"schema_version", "kind", "process_index", "process_count", "counters"}
+        unknown = set(raw) - allowed
+        if unknown:
+            raise ValueError(f"unknown stream-state keys: {sorted(unknown)}")
+        if raw.get("schema_version") != 1 or raw.get("kind") != "huggingface_stream_replay":
+            raise ValueError("unsupported instruction stream state")
+        if int(raw.get("process_index", -1)) != self.process_index:
+            raise ValueError("stream checkpoint process_index differs from this process")
+        if int(raw.get("process_count", -1)) != self.process_count:
+            raise ValueError("stream checkpoint process_count differs from this run")
+        counters_raw = raw.get("counters")
+        if not isinstance(counters_raw, Mapping):
+            raise ValueError("stream checkpoint counters must be a mapping")
+        counter_fields = set(StreamCounters.__dataclass_fields__)
+        if set(counters_raw) != counter_fields:
+            raise ValueError("stream checkpoint counter fields do not match this version")
+        reasons = counters_raw.get("adapter_errors_by_reason")
+        if not isinstance(reasons, Mapping):
+            raise ValueError("adapter_errors_by_reason must be a mapping")
+        counters = StreamCounters(
+            rows_seen=int(counters_raw["rows_seen"]),
+            rows_seen_in_epoch=int(counters_raw["rows_seen_in_epoch"]),
+            rows_emitted=int(counters_raw["rows_emitted"]),
+            adapter_errors=int(counters_raw["adapter_errors"]),
+            adapter_errors_by_reason={str(key): int(value) for key, value in reasons.items()},
+            length_rejections=int(counters_raw["length_rejections"]),
+            zero_objective=int(counters_raw["zero_objective"]),
+            epochs=int(counters_raw["epochs"]),
+        )
+        numeric = (
+            counters.rows_seen,
+            counters.rows_seen_in_epoch,
+            counters.rows_emitted,
+            counters.adapter_errors,
+            counters.length_rejections,
+            counters.zero_objective,
+            counters.epochs,
+            *counters.adapter_errors_by_reason.values(),
+        )
+        if any(value < 0 for value in numeric):
+            raise ValueError("stream checkpoint counters must be non-negative")
+        if counters.rows_seen_in_epoch > counters.rows_seen:
+            raise ValueError("rows_seen_in_epoch cannot exceed rows_seen")
+        if counters.adapter_errors != sum(counters.adapter_errors_by_reason.values()):
+            raise ValueError("adapter error total differs from per-reason counters")
+        classified_rows = (
+            counters.rows_emitted
+            + counters.adapter_errors
+            + counters.length_rejections
+            + counters.zero_objective
+        )
+        if classified_rows != counters.rows_seen:
+            raise ValueError("stream checkpoint row classifications do not sum to rows_seen")
+
+        self.close()
+        iterator = self._make_iterator(epoch=counters.epochs)
+        for skipped in range(counters.rows_seen_in_epoch):
+            try:
+                next(iterator)
+            except StopIteration as error:
+                close = getattr(iterator, "close", None)
+                if callable(close):
+                    close()
+                raise ValueError(
+                    f"dataset ended after {skipped} rows while replaying a {counters.rows_seen_in_epoch}-row cursor"
+                ) from error
+        self._iterator = iterator
+        self.counters = counters
+
     def _make_iterator(self, *, epoch: int) -> Iterator[dict[str, Any]]:
         from datasets import load_dataset
         from datasets.distributed import split_dataset_by_node
@@ -78,20 +164,23 @@ class InstructionBatchStream:
         dataset = split_dataset_by_node(dataset, rank=self.process_index, world_size=self.process_count)
         return iter(dataset)
 
-    def _next_row(self) -> dict[str, Any]:
+    def _next_row(self) -> tuple[dict[str, Any], int]:
         while True:
             try:
-                return next(self._iterator)
+                row = next(self._iterator)
+                row_index = self.counters.rows_seen
+                self.counters.rows_seen += 1
+                self.counters.rows_seen_in_epoch += 1
+                return row, row_index
             except StopIteration:
                 self.close()
                 self.counters.epochs += 1
+                self.counters.rows_seen_in_epoch = 0
                 self._iterator = self._make_iterator(epoch=self.counters.epochs)
 
     def _next_sample_arrays(self) -> dict[str, np.ndarray]:
         while True:
-            row = self._next_row()
-            row_index = self.counters.rows_seen
-            self.counters.rows_seen += 1
+            row, row_index = self._next_row()
             context = AdapterContext(
                 repo_id=self.spec.repo_id,
                 revision=self.spec.revision,
@@ -110,8 +199,12 @@ class InstructionBatchStream:
                     max_length=self.max_length,
                     truncation=self.truncation,
                 )
-            except AdapterError:
+            except AdapterError as error:
                 self.counters.adapter_errors += 1
+                reason = f"{type(error).__name__}: {error}"[:240]
+                self.counters.adapter_errors_by_reason[reason] = (
+                    self.counters.adapter_errors_by_reason.get(reason, 0) + 1
+                )
                 continue
             except ValueError as error:
                 if "exceeding max_length" in str(error):

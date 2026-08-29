@@ -43,7 +43,9 @@ def tree_global_norm(tree: object) -> jax.Array:
 
 def clip_by_global_norm(tree: object, max_norm: float) -> tuple[object, jax.Array]:
     norm = tree_global_norm(tree)
-    scale = jnp.minimum(1.0, jnp.asarray(max_norm, jnp.float32) / jnp.maximum(norm, 1e-12))
+    # Match torch.nn.utils.clip_grad_norm_: its 1e-6 denominator guard is
+    # observable near the clipping boundary and therefore part of parity.
+    scale = jnp.minimum(1.0, jnp.asarray(max_norm, jnp.float32) / (norm + 1e-6))
     return jax.tree.map(lambda value: value * scale.astype(value.dtype), tree), norm
 
 
