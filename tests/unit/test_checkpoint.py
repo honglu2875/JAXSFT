@@ -8,6 +8,7 @@ import pytest
 
 from jaxsft.optim import adamw_init
 from train_sft import (
+    environment_flag,
     git_identity,
     load_checkpoint,
     load_synthetic_cursor,
@@ -32,6 +33,16 @@ def _assert_trees_equal(left, right):
     assert len(jax.tree.leaves(left)) == len(jax.tree.leaves(right))
     for left_leaf, right_leaf in zip(jax.tree.leaves(left), jax.tree.leaves(right)):
         np.testing.assert_array_equal(left_leaf, right_leaf)
+
+
+def test_environment_flag_is_explicit_and_rejects_ambiguous_values(monkeypatch):
+    monkeypatch.delenv("JAXSFT_FORCE_FP32", raising=False)
+    assert environment_flag("JAXSFT_FORCE_FP32") is False
+    monkeypatch.setenv("JAXSFT_FORCE_FP32", "1")
+    assert environment_flag("JAXSFT_FORCE_FP32") is True
+    monkeypatch.setenv("JAXSFT_FORCE_FP32", "true")
+    with pytest.raises(ValueError, match="exactly 0 or 1"):
+        environment_flag("JAXSFT_FORCE_FP32")
 
 
 def test_checkpoint_round_trip_has_content_marker_and_replay_cursors(tmp_path):

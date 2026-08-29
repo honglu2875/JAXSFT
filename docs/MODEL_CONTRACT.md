@@ -133,7 +133,21 @@ At a pinned immutable Hub revision:
 - JAX checkpoint save/restore preserves outputs;
 - export/reload is tested when export is advertised.
 
-### Tier 5 — Distributed training support
+### Tier 5 — Full-model trajectory parity
+
+- A framework-neutral, content-addressed tape feeds identical token IDs, masks,
+  and metadata-derived target weights to JAX and an independent canonical
+  framework implementation.
+- Recipe/tape identities, selected denominators, input-token counts, schedule
+  values, dtype policy, and implementation versions are recorded and checked.
+- Report both per-step tolerance and post-update drift: least-squares error
+  slope, equal early/late-window means and maxima, and final error. A bounded
+  maximum alone does not establish that the trajectories are not separating.
+- Include an auditable all-FP32/highest-contraction control when backend support
+  permits it. This diagnoses reduced-precision effects but does not erase
+  backend-specific tiling, reductions, or optimizer kernels.
+
+### Tier 6 — Distributed training support
 
 - declared partition rules cover every parameter;
 - one update matches the unsharded reference within backend tolerance;

@@ -46,6 +46,16 @@ completed three more full OLMo 2 updates, and exited cleanly after distributed
 shutdown. A follow-up synthetic run started from the empty lockfile left by the
 previous clean libtpu exit and proved the conservative preflight recovery path.
 
+The same host later completed two batch-identical 20-step OLMo 2 trajectory
+gates against an independent stock Transformers/Accelerate CPU run. Production
+BF16 used FP32 Adam moments plus global and explicit `HIGHEST` contraction
+precision; its relative loss gap did not widen between equal post-update
+halves. A `--force-fp32` controller lane set `JAXSFT_FORCE_FP32=1`, loaded all
+parameters as FP32, and reduced maximum TPU/CPU relative loss error to 0.0214%.
+The FP32 TPU compiler log showed FP32 contractions with highest/highest operand
+precision. Exact hashes and drift statistics are in
+[the trajectory result](results/olmo2_1b_trajectory_parity_20.json).
+
 The real run's first backward compile took about 101 seconds. A measured steady
 step took 0.403 seconds at 2,538 input tokens/s for length 256 and local batch
 four. This is a correctness smoke, not a benchmark: it uses replicated full
@@ -173,6 +183,10 @@ that a later edit mutates a running job.
 - A preflight refuses an active TPU/lock owner and safely recovers only an
   unowned empty `/tmp/libtpu_lockfile`.
 - All ranks validate the same source/config hashes before compilation.
+- `--force-fp32` adds only the strict `JAXSFT_FORCE_FP32=1` worker environment;
+  the worker records recipe/effective dtypes, global matmul precision, and
+  explicit contraction precision in its manifest, initialization event, and
+  final result.
 
 ### Monitor and collect
 

@@ -421,6 +421,20 @@ def _remote_libtpu_preflight_command() -> str:
     )
 
 
+def _remote_batch_tape_path(profile: ClusterProfile, value: str | None) -> PurePosixPath | None:
+    if value is None:
+        return None
+    path = PurePosixPath(value)
+    allowed_roots = (profile.remote_cache_root, profile.remote_workspace_root)
+    if (
+        not path.is_absolute()
+        or ".." in path.parts
+        or not any(path != root and path.is_relative_to(root) for root in allowed_roots)
+    ):
+        raise ClusterError("--batch-tape must be below the profile's dedicated remote cache or workspace root")
+    return path
+
+
 def run_remote(profile: ClusterProfile, args: argparse.Namespace) -> int:
     state = load_state(profile, args.run_id)
     recipe = _recipe_relative(args.recipe)
@@ -434,6 +448,9 @@ def run_remote(profile: ClusterProfile, args: argparse.Namespace) -> int:
     # sharing the dedicated cache root avoids downloading the same pinned inputs
     # for every immutable run directory.
     cache = profile.remote_cache_root
+    batch_tape = _remote_batch_tape_path(profile, getattr(args, "batch_tape", None))
+    if getattr(args, "synthetic", False) and batch_tape is not None:
+        raise ClusterError("--synthetic and --batch-tape are mutually exclusive")
     local_uv, uv_digest, uv_payload = _local_uv_binary()
     remote_uv = cache / "bin" / f"uv-{uv_digest[:16]}"
     env = {
@@ -444,9 +461,16 @@ def run_remote(profile: ClusterProfile, args: argparse.Namespace) -> int:
         "UV_PROJECT_ENVIRONMENT": str(venv),
     }
     env_text = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
+    tape_check = (
+        ""
+        if batch_tape is None
+        else f"test -d {shlex.quote(str(batch_tape))} && "
+        f"test -f {shlex.quote(str(batch_tape / 'manifest.json'))}; "
+    )
     prepare = (
         f"set -eu; mkdir -p {shlex.quote(str(cache))} {shlex.quote(str(artifacts))} "
         f"{shlex.quote(str(temporary_root))} {shlex.quote(str(tpu_log_root))}; "
+        f"{tape_check}"
         f"cd {shlex.quote(str(source))}; env {env_text} {shlex.quote(str(remote_uv))} sync --frozen --no-dev"
     )
     coordinator = f"{profile.coordinator_host}:{profile.coordinator_port}"
@@ -466,6 +490,8 @@ def run_remote(profile: ClusterProfile, args: argparse.Namespace) -> int:
             "TEST_TMPDIR": str(temporary_root),
             "TPU_LOG_DIR": str(tpu_log_root),
         }
+        if getattr(args, "force_fp32", False):
+            run_env["JAXSFT_FORCE_FP32"] = "1"
         run_env_text = " ".join(f"{key}={shlex.quote(value)}" for key, value in run_env.items())
         python = venv / "bin" / "python"
         train = source / "train_sft.py"
@@ -481,6 +507,8 @@ def run_remote(profile: ClusterProfile, args: argparse.Namespace) -> int:
                     str(args.synthetic_vocab_size),
                 )
             )
+        if batch_tape is not None:
+            extra_arguments.extend(("--batch-tape", str(batch_tape)))
         extra_text = "" if not extra_arguments else " " + shlex.join(extra_arguments)
         return (
             f"set -eu; test ! -e {shlex.quote(str(pid_file))}; "
@@ -661,6 +689,12 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--synthetic", action="store_true")
             command.add_argument("--synthetic-length", type=int, default=32)
             command.add_argument("--synthetic-vocab-size", type=int, default=128)
+            command.add_argument("--batch-tape", help="absolute validated tape path already present on every host")
+            command.add_argument(
+                "--force-fp32",
+                action="store_true",
+                help="set the recorded JAXSFT_FORCE_FP32 numerical control lane",
+            )
         elif name == "stop":
             command.add_argument("--grace-seconds", type=int, default=15)
         command.set_defaults(function=function)

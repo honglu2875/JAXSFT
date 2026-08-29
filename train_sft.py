@@ -21,6 +21,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from jaxsft.batch_tape import BatchTape
 from jaxsft.config import Recipe, load_recipe
 from jaxsft.loss import causal_loss_statistics
 from jaxsft.optim import AdamWHyperparameters, AdamWState, adamw_init, adamw_update, cosine_learning_rate
@@ -47,6 +48,15 @@ def atomic_json(path: Path, payload: Any) -> None:
     temporary = path.with_name(path.name + f".tmp-{os.getpid()}")
     temporary.write_text(json.dumps(payload, indent=2, sort_keys=True, default=_json_default) + "\n")
     os.replace(temporary, path)
+
+
+def environment_flag(name: str) -> bool:
+    """Read an auditable boolean environment switch without truthy-string ambiguity."""
+
+    raw = os.environ.get(name, "0")
+    if raw not in {"0", "1"}:
+        raise ValueError(f"{name} must be exactly 0 or 1")
+    return raw == "1"
 
 
 def git_identity(root: Path) -> dict[str, Any]:
@@ -412,6 +422,21 @@ def run(args: argparse.Namespace) -> int:
     if args.dry_run:
         print(json.dumps(recipe.public_dict(), indent=2, sort_keys=True))
         return 0
+    if args.synthetic and args.batch_tape:
+        raise ValueError("--synthetic and --batch-tape are mutually exclusive")
+
+    force_fp32 = environment_flag("JAXSFT_FORCE_FP32")
+    # Keep the global default strict even where a future operation omits an
+    # explicit precision argument. Model contractions also request HIGHEST.
+    jax.config.update("jax_default_matmul_precision", "highest")
+    effective_parameter_dtype = "float32" if force_fp32 else recipe.model.dtype
+    numerics = {
+        "recipe_parameter_dtype": recipe.model.dtype,
+        "effective_parameter_dtype": effective_parameter_dtype,
+        "force_fp32_environment_override": force_fp32,
+        "jax_default_matmul_precision": "highest",
+        "explicit_dot_precision": "HIGHEST",
+    }
 
     snapshot = None if args.synthetic else resolve_model_snapshot(recipe)
     initialize_distributed()
@@ -454,11 +479,34 @@ def run(args: argparse.Namespace) -> int:
             f"got {start_step} < {stop_step}"
         )
 
+    batch_tape = None
+    if args.batch_tape:
+        if process_count != 1:
+            raise RuntimeError("batch-tape trajectory validation currently requires one JAX process")
+        batch_tape = BatchTape.load(args.batch_tape, expected_recipe_identity=recipe.identity_hash)
+        expected_batch_size = (
+            local_device_count
+            * recipe.training.gradient_accumulation_steps
+            * recipe.training.per_device_batch_size
+        )
+        if batch_tape.batch_size != expected_batch_size:
+            raise ValueError(
+                f"batch tape has batch_size={batch_tape.batch_size}, expected {expected_batch_size}"
+            )
+        if batch_tape.length != recipe.training.max_length:
+            raise ValueError(
+                f"batch tape has length={batch_tape.length}, expected {recipe.training.max_length}"
+            )
+        if batch_tape.steps < stop_step:
+            raise ValueError(f"batch tape has {batch_tape.steps} steps, but this run needs {stop_step}")
+        if restored is not None:
+            batch_tape.validate_state_dict(restored["data_state"], expected_step=start_step)
+
     from jaxsft.models.registry import get_model_implementation
 
     model = get_model_implementation(recipe.model.architecture)
 
-    dtype = jnp.bfloat16 if recipe.model.dtype == "bfloat16" else jnp.float32
+    dtype = jnp.float32 if effective_parameter_dtype == "float32" else jnp.bfloat16
     stream = None
     if args.synthetic:
         model_config = model.tiny_config(vocab_size=args.synthetic_vocab_size)
@@ -473,10 +521,18 @@ def run(args: argparse.Namespace) -> int:
     else:
         model_config, params = model.load_hf_checkpoint(snapshot, dtype=dtype)
     model.validate_params(params, model_config)
+    if force_fp32:
+        non_fp32 = [
+            str(value.dtype)
+            for value in jax.tree.leaves(params)
+            if jnp.issubdtype(value.dtype, jnp.inexact) and value.dtype != jnp.float32
+        ]
+        if non_fp32:
+            raise ValueError(f"JAXSFT_FORCE_FP32 requires FP32 parameters; found {sorted(set(non_fp32))}")
 
     tokenizer_snapshot = None
     encoder = None
-    if not args.synthetic:
+    if not args.synthetic and batch_tape is None:
         from jaxsft.data.tokenize import TokenizerSnapshot
 
         tokenizer_snapshot, encoder = TokenizerSnapshot.load(
@@ -492,6 +548,7 @@ def run(args: argparse.Namespace) -> int:
         rank=process_index,
         recipe=recipe.identity_hash,
         parameter_count=model.parameter_count(model_config),
+        numerics=numerics,
         **topology,
     )
     atomic_json(output_dir / f"rank-{process_index:03d}-topology.json", topology)
@@ -518,13 +575,31 @@ def run(args: argparse.Namespace) -> int:
                 "loading_mode": recipe.data.loading_mode,
                 "renderer": renderer_identity(recipe.data.renderer or recipe.model.architecture),
             },
-            "tokenizer": None
-            if tokenizer_snapshot is None
+            "tokenizer": (
+                {
+                    "identity_sha256": batch_tape.manifest["tokenizer_identity_sha256"],
+                    "pad_token_id": batch_tape.manifest["pad_token_id"],
+                    "source": "batch_tape",
+                }
+                if batch_tape is not None
+                else None
+                if tokenizer_snapshot is None
+                else {
+                    "identity_sha256": tokenizer_snapshot.identity_hash,
+                    "pad_token_id": tokenizer_snapshot.pad_token_id,
+                    "source": "model_snapshot",
+                }
+            ),
+            "batch_tape": None
+            if batch_tape is None
             else {
-                "identity_sha256": tokenizer_snapshot.identity_hash,
-                "pad_token_id": tokenizer_snapshot.pad_token_id,
+                "identity_sha256": batch_tape.identity_hash,
+                "steps": batch_tape.steps,
+                "batch_size": batch_tape.batch_size,
+                "length": batch_tape.length,
             },
             "parameter_count": model.parameter_count(model_config),
+            "numerics": numerics,
             "topology": topology,
             "software": {"python": sys.version, "platform": platform.platform(), "packages": packages},
             "source": source_identity,
@@ -536,6 +611,7 @@ def run(args: argparse.Namespace) -> int:
                 "synthetic": args.synthetic,
                 "synthetic_length": args.synthetic_length if args.synthetic else None,
                 "synthetic_vocab_size": args.synthetic_vocab_size if args.synthetic else None,
+                "batch_tape_identity_sha256": None if batch_tape is None else batch_tape.identity_hash,
             },
         }
         atomic_json(output_dir / "run-manifest.json", manifest)
@@ -574,6 +650,24 @@ def run(args: argparse.Namespace) -> int:
                 "length": min(recipe.training.max_length, args.synthetic_length),
                 "vocab_size": args.synthetic_vocab_size,
             }
+
+        counters = None
+    elif batch_tape is not None:
+        tape_step = start_step
+
+        def next_batch():
+            nonlocal tape_step
+            batch = batch_tape.jax_batch(
+                tape_step,
+                local_device_count=local_device_count,
+                accumulation_steps=recipe.training.gradient_accumulation_steps,
+                per_device_batch_size=recipe.training.per_device_batch_size,
+            )
+            tape_step += 1
+            return batch
+
+        def current_data_state():
+            return batch_tape.state_dict(next_step=tape_step)
 
         counters = None
     else:
@@ -692,6 +786,8 @@ def run(args: argparse.Namespace) -> int:
         "wall_seconds": time.monotonic() - started,
         "last_metrics": last_metrics,
         "stream_counters": None if counters is None else asdict(counters),
+        "batch_tape_identity_sha256": None if batch_tape is None else batch_tape.identity_hash,
+        "numerics": numerics,
     }
     atomic_json(output_dir / f"rank-{process_index:03d}-result.json", result)
     emit(status, **result)
@@ -705,6 +801,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--synthetic", action="store_true", help="run the recipe architecture's tiny model offline")
     parser.add_argument("--synthetic-length", type=int, default=32)
     parser.add_argument("--synthetic-vocab-size", type=int, default=128)
+    parser.add_argument("--batch-tape", help="validated framework-neutral batches for trajectory parity")
     parser.add_argument("--resume", help="trusted local step checkpoint to resume")
     parser.add_argument(
         "--stop-after-step",

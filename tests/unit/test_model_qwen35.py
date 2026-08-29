@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from jaxsft.models.qwen3_5 import (
+    _PRECISION,
     forward,
     gated_delta_recurrent_scan,
     init_params,
@@ -10,6 +11,10 @@ from jaxsft.models.qwen3_5 import (
     tiny_config,
     validate_params,
 )
+
+
+def test_model_contractions_request_highest_lax_precision():
+    assert _PRECISION is jax.lax.Precision.HIGHEST
 
 
 def test_tiny_forward_backward_and_parameter_contract():

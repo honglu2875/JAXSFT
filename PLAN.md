@@ -63,6 +63,17 @@ stack: training/result emission succeeds, but repeated v4-8 checks reproduced a
 PyArrow/Hugging Face HTTP finalizer wait after JAX shutdown. Materialized mode
 is the validated lifecycle until that upstream boundary is replaced or fixed.
 
+The full-model numerical trajectory gate is now complete for OLMo 2. A strict,
+content-addressed tape captured 20 global batches after normal metadata-aware
+rendering, semantic truncation, tokenization, and loss selection. An independent
+CPU program imports no JAXSFT runtime code and uses stock Transformers Trainer,
+Accelerate, PyTorch cross-entropy/AdamW, and the stock cosine scheduler. Against
+the same tape, BF16 TPU relative loss error stayed bounded (5.61% early-half
+mean, 5.28% late-half mean, 4.05% final), while an env-controlled FP32 JAX lane
+reduced maximum relative error to 0.0214%. Both current TPU lanes request global
+and explicit highest contraction precision. This is a 20-step stability gate,
+not evidence for full-run convergence or four-host equivalence.
+
 ## 1. Outcome
 
 Build a small, readable JAX SFT research repository in which a researcher can:
@@ -265,8 +276,9 @@ Exit gate:
 ### M5 — Model breadth
 
 Status: the first item, OLMo 2 dense, has passed tiny parity, pinned public
-checkpoint load/forward parity, shared-trainer SFT, and tiny checkpoint resume
-on a measured single-host v4-8. Remaining items stay gated.
+checkpoint load/forward parity, shared-trainer SFT, 20-step full-model
+BF16/FP32 trajectory comparison against a stock CPU oracle, and tiny checkpoint
+resume on a measured single-host v4-8. Remaining items stay gated.
 
 Deliverables, one gated model at a time:
 

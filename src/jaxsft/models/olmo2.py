@@ -22,7 +22,7 @@ import jax.numpy as jnp
 import numpy as np
 
 ArrayTree = dict[str, Any]
-_PRECISION = jax.lax.Precision.HIGH
+_PRECISION = jax.lax.Precision.HIGHEST
 
 
 @dataclass(frozen=True)

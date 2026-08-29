@@ -35,13 +35,16 @@ in its checked-in recipe or renderer identity.
   clipping, AdamW, cosine scheduling, rank-disjoint streaming or materialized
   Hub data, structured artifacts, replicated data parallelism, and strict
   checkpoint/resume.
+- Content-addressed, framework-neutral batch tapes for replaying identical
+  token IDs, masks, and metadata-derived loss weights through JAX and an
+  independently parsed Hugging Face Trainer/Accelerate CPU oracle.
 - Controller-only `cluster.py doctor|sync|run|status|stop|collect`, immutable
   source capsules, per-run remote directories, conservative stale-libtpu-lock
   recovery, and exact recorded-PID teardown.
 - CPU tests, forced four-device CPU smoke, optional Transformers/PyTorch parity,
   and a frozen `uv.lock`.
 
-The validation gates pass for 64 offline unit tests; byte/token template parity;
+The validation gates pass for 75 offline unit tests; byte/token template parity;
 and tiny-model valid-logit/loss/gradient/AdamW-step parity against Transformers
 and PyTorch for both architectures. Qwen has an exact 320-tensor,
 752,393,024-parameter public-checkpoint audit. A measured single-host v4-8 run
@@ -87,6 +90,16 @@ With the frozen `datasets==4.8.5`/`huggingface-hub==1.29.0` stack, direct remote
 parquet streaming completes training artifacts but can linger in PyArrow HTTP
 finalization. It is therefore an experimental loading mode; use
 `loading_mode: materialized` for a clean validated worker lifecycle.
+
+A content-addressed 20-step tape then drove the same OLMo 2 batches through
+production BF16 JAX, forced-FP32 JAX, and an independent FP32 CPU oracle using
+stock Transformers Trainer, Accelerate, PyTorch AdamW, and the stock cosine
+scheduler. BF16-to-CPU relative loss error showed no sustained half-to-half
+widening (5.61% early-half mean, 5.28% late-half mean, 4.05% final). The FP32
+control reduced maximum relative loss error to 0.0214%. Both JAX lanes record
+global `highest` matmul precision and explicit `lax.Precision.HIGHEST`; the
+FP32 compiler log also showed FP32 contractions with highest/highest operands.
+See the [hostname-free trajectory evidence](docs/results/olmo2_1b_trajectory_parity_20.json).
 
 ## Quick start
 
@@ -164,6 +177,11 @@ existing run directory, or kills by process name. Add `--synthetic` to
 `cluster.py run` for a tiny architecture/topology smoke before resolving public
 weights.
 
+For numerical controls, `cluster.py run --force-fp32` sets the strictly parsed
+`JAXSFT_FORCE_FP32=1` override and records the recipe dtype, effective dtype,
+global matmul setting, and explicit dot precision in every run artifact. It is
+an equivalence lane, not the default production-memory configuration.
+
 ## Repository map
 
 ```text
@@ -172,6 +190,7 @@ cluster.py                           controller-side SSH lifecycle
 configs/recipes/                     strict, immutable experiments
 configs/clusters/                    public profile examples
 src/jaxsft/data/                     IR, adapters, renderer, aligner, stream
+src/jaxsft/batch_tape.py             strict framework-neutral replay batches
 src/jaxsft/models/qwen3_5.py         complete dense Qwen3.5 text model
 src/jaxsft/models/olmo2.py           complete dense OLMo 2 text model
 src/jaxsft/models/registry.py        explicit trainer dispatch only
@@ -179,6 +198,8 @@ src/jaxsft/loss.py                   additive weighted causal objective
 src/jaxsft/optim.py                  visible AdamW and schedule
 tests/unit/                          offline CPU contracts
 tests/parity/                        Hugging Face numerical/token oracles
+scripts/run_hf_trajectory.py         independent stock Trainer CPU trajectory
+scripts/compare_trajectories.py      loss-error and widening/stability gate
 docs/MODELS.md                       evidence-based compatibility table
 docs/                                architecture contracts, cards, results, roadmap
 ```

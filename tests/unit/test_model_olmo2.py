@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from jaxsft.models.olmo2 import (
+    _PRECISION,
     Olmo2Config,
     forward,
     init_params,
@@ -11,6 +12,10 @@ from jaxsft.models.olmo2 import (
     tiny_config,
     validate_params,
 )
+
+
+def test_model_contractions_request_highest_lax_precision():
+    assert _PRECISION is jax.lax.Precision.HIGHEST
 
 
 def test_tiny_forward_backward_and_parameter_contract():

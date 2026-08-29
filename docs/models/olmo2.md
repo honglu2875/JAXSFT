@@ -39,6 +39,23 @@ Transformers on CPU. It passed `rtol=atol=2e-4`; maximum absolute error was
 were identical. The bfloat16 loader/forward path separately produced finite
 logits after the complete tensor audit.
 
+A later full-model gate materialized 20 exact global batches (four examples by
+256 tokens) and replayed them through three implementations. The CPU oracle
+imports no JAXSFT runtime code: it independently parses/hashes the recipe and
+batch tape, uses `AutoModelForCausalLM`, PyTorch cross-entropy, stock
+`transformers.Trainer` AdamW parameter groups and cosine-with-minimum-LR
+scheduler, and Accelerate on CPU. Recipe identity, tape identity, loss
+denominator, input-token count, and update learning rate matched at every step.
+
+Against that FP32 CPU run, production BF16 TPU loss error had an 8.52% maximum,
+5.61% early post-update mean, 5.28% late mean, and 4.05% final value. Thus the
+short trajectory was wider but did not progressively separate. A forced-FP32
+TPU control reduced maximum relative loss error to 0.0214%; its least-squares
+relative-error slope was 0.000308 percentage points per step. These comparisons
+do not claim bit equality or isolate TPU tiling/reduction behavior from dtype
+effects. Full evidence is in
+[the 20-step trajectory record](../results/olmo2_1b_trajectory_parity_20.json).
+
 ## Training evidence
 
 The same trainer and pinned UltraChat stream used by Qwen completed three
@@ -47,6 +64,12 @@ length 256, per-device batch size one, rematerialized blocks, bfloat16
 parameters, and FP32 Adam moments. All loss and gradient metrics were finite.
 A tiny OLMo2 TPU run interrupted at step two and cold-resumed through step
 three; its final checkpoint was byte-identical to the uninterrupted reference.
+
+The 20-step BF16 trajectory subsequently completed under the same replicated
+v4-8 topology with `jax_default_matmul_precision=highest` and explicit
+`lax.Precision.HIGHEST`. Its first step, including compile, took 63.42 seconds;
+steps 3–20 averaged 0.1166 seconds. The matched FP32 control fit as well, with a
+105.83-second first step and 0.2480-second mean for steps 3–20.
 
 Bfloat16 parameters occupy about 2.77 GiB and two FP32 Adam moment trees about
 11.06 GiB per replica before gradients, activations, executable storage, and

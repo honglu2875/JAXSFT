@@ -1,0 +1,285 @@
+{
+  "schema_version": 1,
+  "model": {
+    "architecture": "olmo2",
+    "repo_id": "allenai/OLMo-2-0425-1B",
+    "revision": "a1847dff35000b4271fa70afc5db10fd29fedbdf",
+    "parameter_count": 1484916736,
+    "checkpoint_files": [
+      {
+        "file": "model-00001-of-00002.safetensors",
+        "bytes": 4983360992,
+        "sha256": "c52e4ac8bf4867e698d908f9e8c2b84aa891b91dff066d46bf2a7cf453ad77fb"
+      },
+      {
+        "file": "model-00002-of-00002.safetensors",
+        "bytes": 956326560,
+        "sha256": "5f80762572fe28aca49b01b98895d96ca529b9792fc10925a977a161ad768d30"
+      }
+    ]
+  },
+  "recipe": {
+    "path": "configs/recipes/olmo2_1b_ultrachat_trajectory_20.yaml",
+    "file_sha256": "322bf23499cfc39efe420a7f386521739b131eca1aad5ff8b1fec1d6dd3f4d16",
+    "identity_sha256": "0ca3e45cf80fad55bbf438ed647409aff034e8f060f8ef35787e6f1fffc4e010",
+    "steps": 20,
+    "max_length": 256,
+    "per_device_batch_size": 1,
+    "gradient_accumulation_steps": 1,
+    "warmup_steps": 2
+  },
+  "batch_tape": {
+    "kind": "jaxsft_batch_tape",
+    "identity_sha256": "d8c321f1c5c204cd0383249a5f8ca968abeca7c40d1afbf21a472f704ac75ed7",
+    "manifest_sha256": "ea147d0dce0bc26496c6beaac722b74b47e08bf863961cb3473230340760407a",
+    "shape": {
+      "steps": 20,
+      "batch_size": 4,
+      "length": 256
+    },
+    "arrays": {
+      "input_ids_sha256": "3222d55eaed9bb197626d7d426a6700df9b5f5e03fbd7d708cff39b8ac56f98b",
+      "attention_mask_sha256": "b09244426c6fdc721448389e18c6472873c0b1d3d33b40ab2e3154408afe1df0",
+      "loss_weights_sha256": "ff1604f133369c4052babf77344bfff36a06284cc69ac7960bd69550158acf7c"
+    },
+    "tokenizer_identity_sha256": "6049ea77fe1039acf27aceed4664bdd4e22b9c223f87ec0aed6ffb0bcdea141a",
+    "data": {
+      "repo_id": "HuggingFaceH4/ultrachat_200k",
+      "revision": "8049631c405ae6576f93f445c6b8166f76f5505a",
+      "config": "default",
+      "split": "train_sft",
+      "adapter": "ultrachat_200k",
+      "renderer": "olmo2_instruct",
+      "loading_mode": "materialized"
+    },
+    "export_counters": {
+      "rows_seen": 128,
+      "rows_emitted": 80,
+      "adapter_errors": 11,
+      "semantic_truncation_rejections": 37,
+      "semantic_truncated_samples": 79,
+      "context_constraint_relaxations": 32,
+      "zero_objective": 0
+    }
+  },
+  "source": {
+    "kind": "source_capsule",
+    "sha256": "b793c9de4653a4067e7837825cb41ed32b319eae2fde766f9326d8492ae79fab"
+  },
+  "topology": {
+    "backend": "tpu",
+    "accelerator_type": "v4-8",
+    "process_count": 1,
+    "local_device_count": 4,
+    "global_device_count": 4,
+    "parameters_and_optimizer": "replicated"
+  },
+  "cpu_oracle": {
+    "status": "complete",
+    "device": "cpu",
+    "precision": "float32",
+    "threads": 120,
+    "steps": 20,
+    "train_wall_seconds": 152.5288951927796,
+    "seconds_per_step": 7.62644475963898,
+    "framework": "transformers.Trainer+accelerate",
+    "model_api": "transformers.AutoModelForCausalLM",
+    "training_api": "transformers.Trainer backed by accelerate.Accelerator",
+    "objective_api": "torch.nn.functional.cross_entropy with external token weights",
+    "optimizer_factory": "stock transformers.Trainer.create_optimizer",
+    "scheduler_factory": "stock transformers.Trainer.create_scheduler",
+    "optimizer": "accelerate.optimizer.AcceleratedOptimizer wrapping torch.optim.AdamW",
+    "scheduler": "stock Transformers cosine_with_min_lr",
+    "parameter_dtypes": ["torch.float32"],
+    "moment_dtypes": ["torch.float32"],
+    "weight_decay_by_group": [0.1, 0.0],
+    "weight_decay_group_audit": {
+      "stock_trainer_decay_tensor_count": 114,
+      "matrix_tensor_rule_decay_tensor_count": 114,
+      "stock_only": [],
+      "matrix_tensor_rule_only": []
+    },
+    "jaxsft_runtime_imports": false,
+    "software": {
+      "python": "3.12.13",
+      "torch": "2.13.0",
+      "transformers": "5.16.1",
+      "accelerate": "1.14.0",
+      "numpy": "2.5.2",
+      "pyyaml": "6.0.3"
+    },
+    "oracle_script_sha256": "fd745bc15c6a1b1ebbcda2488e68ea3f7ce0581b6d232a4c458bcbfe332d8d98",
+    "result_json_sha256": "1446af8ab1748eb35948e437b2b9dfe9177e67ab183a18c6482f8346c8f4feb4",
+    "losses": [
+      2.1212105751037598,
+      2.038116693496704,
+      1.788066029548645,
+      1.504140853881836,
+      1.5879571437835693,
+      1.6888699531555176,
+      1.622899055480957,
+      1.6766698360443115,
+      1.8244287967681885,
+      1.3587499856948853,
+      1.4381603002548218,
+      1.2489718198776245,
+      1.3192228078842163,
+      1.520538568496704,
+      1.515960454940796,
+      1.807611346244812,
+      1.7456731796264648,
+      1.7834880352020264,
+      1.542189121246338,
+      1.580696702003479
+    ]
+  },
+  "tpu_bfloat16_highest": {
+    "status": "complete",
+    "numerics": {
+      "recipe_parameter_dtype": "bfloat16",
+      "effective_parameter_dtype": "bfloat16",
+      "force_fp32_environment_override": false,
+      "jax_default_matmul_precision": "highest",
+      "explicit_dot_precision": "HIGHEST",
+      "optimizer_moments": "float32"
+    },
+    "software": {
+      "jax": "0.11.0",
+      "jaxlib": "0.11.0",
+      "numpy": "2.5.2"
+    },
+    "wall_seconds": 68.49077886994928,
+    "first_step_seconds_including_compile": 63.42046733573079,
+    "second_step_seconds": 2.948213961906731,
+    "mean_step_seconds_3_through_20": 0.11656352422303623,
+    "distributed_shutdown_seconds": 0.004643999971449375,
+    "losses": [
+      2.119795560836792,
+      2.0378477573394775,
+      1.834320306777954,
+      1.5833677053451538,
+      1.679306983947754,
+      1.774022102355957,
+      1.7186459302902222,
+      1.784430742263794,
+      1.9046682119369507,
+      1.4722790718078613,
+      1.5353425741195679,
+      1.330210566520691,
+      1.3857876062393188,
+      1.5835720300674438,
+      1.6277415752410889,
+      1.8649224042892456,
+      1.826507329940796,
+      1.8558648824691772,
+      1.6735225915908813,
+      1.644758939743042
+    ],
+    "artifact_sha256": {
+      "rank_log": "74a339391632c7958bf241f6f04b56edabe229a018498b10a51fb417f079b8f6",
+      "run_manifest": "8a6e211e16ede597da3b772f9d922acbce1bae73dd6cecfc063fa13b24c12736",
+      "result": "873c9b3587ae231332a1850cedb6a15aa1cd8dc01681be65737153d630ac294a",
+      "topology": "d84c8a5a48d037f1de21b7f168f09bc52bdb08f710e6c78aa9862b729a174759"
+    }
+  },
+  "tpu_float32_highest": {
+    "status": "complete",
+    "numerics": {
+      "recipe_parameter_dtype": "bfloat16",
+      "effective_parameter_dtype": "float32",
+      "force_fp32_environment_override": true,
+      "jax_default_matmul_precision": "highest",
+      "explicit_dot_precision": "HIGHEST",
+      "optimizer_moments": "float32"
+    },
+    "compiler_observation": {
+      "contraction_dtype": "float32",
+      "operand_precision": "highest,highest",
+      "local_driver_info_log_sha256": "fcf5c8162f940d72b5be273909926415e7bcfd00b67081aa0404d0186d1a9560"
+    },
+    "wall_seconds": 115.44728318229318,
+    "first_step_seconds_including_compile": 105.82791257929057,
+    "second_step_seconds": 5.132543045096099,
+    "mean_step_seconds_3_through_20": 0.24799062006382477,
+    "distributed_shutdown_seconds": 0.0049172984436154366,
+    "losses": [
+      2.121234178543091,
+      2.0381417274475098,
+      1.7880905866622925,
+      1.5041552782058716,
+      1.5879499912261963,
+      1.68888521194458,
+      1.6229302883148193,
+      1.6766371726989746,
+      1.8244496583938599,
+      1.3587418794631958,
+      1.4381569623947144,
+      1.2492382526397705,
+      1.3192517757415771,
+      1.5205808877944946,
+      1.5160250663757324,
+      1.8074097633361816,
+      1.7456445693969727,
+      1.7835965156555176,
+      1.5421887636184692,
+      1.5808097124099731
+    ],
+    "artifact_sha256": {
+      "rank_log": "ddfd128cc733ca7a10e3e4be8c04bd2b0ee64508ec2452a318620a2d0a850401",
+      "run_manifest": "ac2ddb795ae0e6eecb62e2ad5fcc283dd535c69f3aa43efdde4502e279316938",
+      "result": "ea3fb9c08ab37a830ffe64d131298b77287fa7f9c087a7f0da15a7e0fbe624bb",
+      "topology": "d84c8a5a48d037f1de21b7f168f09bc52bdb08f710e6c78aa9862b729a174759"
+    }
+  },
+  "comparisons": {
+    "shared_contract": {
+      "same_recipe_identity": true,
+      "same_batch_tape_identity": true,
+      "exact_selected_loss_denominators_at_every_step": true,
+      "exact_input_token_counts_at_every_step": true,
+      "matched_update_learning_rates_at_every_step": true,
+      "stability_window": "steps 3 through 20, after the first nonzero update can affect a measured loss"
+    },
+    "bfloat16_tpu_vs_float32_cpu": {
+      "status": "passed",
+      "thresholds": {
+        "maximum_relative_loss_error": 0.1,
+        "maximum_relative_error_slope_per_step": 0.001,
+        "maximum_late_minus_early_mean_relative_error": 0.02
+      },
+      "maximum_absolute_loss_error": 0.13133347034454346,
+      "mean_absolute_loss_error": 0.07633307576179504,
+      "maximum_relative_loss_error": 0.08516041809347275,
+      "post_update_relative_error_slope_per_step": 0.00018283879383471088,
+      "early_half_mean_relative_error": 0.05609599405974779,
+      "late_half_mean_relative_error": 0.052774854180533605,
+      "late_minus_early_mean_relative_error": -0.0033211398792141883,
+      "final_relative_error": 0.040527849307439114,
+      "comparison_json_sha256": "4967c85cfa528b32757b39b91e96973d1ec747317a37fd31ecfa1228594a1398"
+    },
+    "float32_tpu_vs_float32_cpu": {
+      "status": "passed",
+      "thresholds": {
+        "maximum_relative_loss_error": 0.0003,
+        "maximum_relative_error_slope_per_step": 0.00001,
+        "maximum_late_minus_early_mean_relative_error": 0.0001
+      },
+      "maximum_absolute_loss_error": 0.0002664327621459961,
+      "mean_absolute_loss_error": 0.00005303025245666504,
+      "maximum_relative_loss_error": 0.00021332167620251148,
+      "post_update_relative_error_slope_per_step": 0.000003083619040187088,
+      "early_half_mean_relative_error": 0.000010590049980284517,
+      "late_half_mean_relative_error": 0.00006291016916569765,
+      "late_minus_early_mean_relative_error": 0.00005232011918541313,
+      "final_relative_error": 0.00007149404838442681,
+      "comparison_json_sha256": "268a9c15e9c8563f990ea22db6cda03a46b8a43dbfc76e42f40befc412fe519d"
+    }
+  },
+  "conclusions": [
+    "The CPU oracle is a separate runtime path: it imports no JAXSFT code, independently parses and hashes the recipe and tape, and delegates the model, AdamW optimizer, scheduler, clipping, and execution to stock Transformers, PyTorch, and Accelerate APIs. Only the metadata-weighted token objective is supplied by a minimal Trainer subclass.",
+    "BF16 TPU and FP32 CPU are not expected to be numerically equal. Their post-update relative loss error is bounded over 18 measurements: the late-half mean is lower than the early-half mean and the final error is 4.05%, despite a small positive least-squares slope caused by the oscillating series.",
+    "Forcing JAX parameters and contractions to FP32 reduces the maximum relative loss error to 0.0214%. Its late-half error is slightly higher than its early-half error, but the absolute band and slope remain very small over 20 steps.",
+    "The FP32 control strongly implicates reduced-precision parameter/update effects in the wider BF16 gap, but it does not isolate them completely: TPU XLA tiling, reductions, and kernels differ from the CPU PyTorch implementation.",
+    "This is a bounded short-trajectory validation, not proof that drift stays bounded for a full SFT run or that CPU and TPU are bit-exact. Longer-duration and four-host gates remain required."
+  ]
+}

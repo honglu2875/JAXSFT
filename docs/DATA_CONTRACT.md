@@ -359,6 +359,32 @@ Each cache has a schema version, content hash, input manifest, completion marker
 and validation command. Cache misses rebuild; identity mismatches never fall
 back to a “close enough” artifact.
 
+### Framework-neutral trajectory tapes
+
+Numerical trajectory comparisons use a narrower immutable artifact than a
+general token cache. `scripts/make_batch_tape.py` consumes the normal adapter,
+renderer, tokenizer, truncation, and loss-policy path once, then writes exactly
+three step-major NumPy arrays: `input_ids` (`int32`), `attention_mask` (`bool`),
+and target-aligned `loss_weights` (`float32`). Their common shape is
+`[steps, global_batch, length]`.
+
+The manifest binds every array digest to the resolved recipe, model/data pins,
+tokenizer identity, pad token, shape, and post-export stream counters. Its own
+identity is a domain-separated hash over the canonical manifest. Readers reject
+symlinks, unexpected manifest fields/array declarations, dtype or shape changes,
+non-prefix masks, negative/non-finite weights, weights on padding or first tokens, and any step
+with a zero selected-loss denominator.
+
+`train_sft.py --batch-tape` reshapes each global batch into the declared local
+device/microbatch layout without rerunning dataset logic. The independent CPU
+oracle reimplements manifest and array validation without importing JAXSFT, so
+the comparison shares bytes but not the loader, model, loss kernel, optimizer,
+or scheduler implementation. Comparison requires identical recipe/tape hashes,
+selected denominators, input-token counts, update learning rates, and step
+indices before evaluating loss tolerances or drift. Tapes are validation
+fixtures, not a replacement for the metadata-rich data pipeline or a scalable
+training format.
+
 ## 13. Required adversarial fixtures
 
 - user text that contains strings identical to model control tokens;

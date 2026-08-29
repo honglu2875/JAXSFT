@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 parity = [
+    "accelerate>=1.1,<2",
     "torch>=2.10,<3",
     "transformers>=5.0,<6",
 ]

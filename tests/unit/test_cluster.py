@@ -103,6 +103,40 @@ def test_synthetic_cluster_launch_forwards_shape_flags(tmp_path, monkeypatch, ca
     assert "--synthetic --synthetic-length 24 --synthetic-vocab-size 96" in output
 
 
+def test_batch_tape_cluster_launch_requires_dedicated_remote_path(tmp_path, monkeypatch, capsys):
+    profile = cluster.load_profile(PROFILE)
+    monkeypatch.setattr(cluster, "STATE_ROOT", tmp_path)
+    state = cluster.RunState(
+        run_id="tape-fixture",
+        source_sha256="d" * 64,
+        remote_run_dir="/dev/shm/jaxsft-runs/tape-fixture",
+        hosts=profile.hosts,
+    )
+    cluster.save_state(profile, state)
+    arguments = Namespace(
+        run_id="tape-fixture",
+        recipe=str(
+            Path(__file__).parents[2]
+            / "configs"
+            / "recipes"
+            / "olmo2_1b_ultrachat_trajectory_20.yaml"
+        ),
+        dry_run=True,
+        synthetic=False,
+        batch_tape="/dev/shm/jaxsft-cache/batch-tapes/fixture",
+        force_fp32=True,
+    )
+    assert cluster.run_remote(profile, arguments) == 0
+    output = capsys.readouterr().out
+    assert "test -f /dev/shm/jaxsft-cache/batch-tapes/fixture/manifest.json" in output
+    assert "--batch-tape /dev/shm/jaxsft-cache/batch-tapes/fixture" in output
+    assert "JAXSFT_FORCE_FP32=1" in output
+
+    arguments.batch_tape = "/tmp/unscoped-tape"
+    with pytest.raises(cluster.ClusterError, match="dedicated remote"):
+        cluster.run_remote(profile, arguments)
+
+
 def test_uv_bootstrap_uses_probe_before_uploading_controller_bytes():
     remote = cluster.PurePosixPath("/dev/shm/jaxsft-cache/bin/uv-deadbeef")
     probe = cluster._remote_uv_probe_command(remote, "a" * 64)

@@ -8,7 +8,7 @@ PROFILE ?= configs/clusters/four-host-tpu.local.toml
 check:
 	$(UV) run ruff check .
 	PYTHONPATH=src JAX_PLATFORMS=cpu $(PYTHON) -m pytest -q tests/unit
-	$(PYTHON) -m compileall -q src train_sft.py cluster.py
+	$(PYTHON) -m compileall -q src scripts train_sft.py cluster.py
 
 smoke:
 	PYTHONPATH=src JAX_PLATFORMS=cpu $(PYTHON) train_sft.py --config $(RECIPE) --synthetic
