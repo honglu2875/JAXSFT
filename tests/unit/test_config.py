@@ -36,3 +36,14 @@ def test_unknown_objective_key_is_rejected_during_recipe_load(tmp_path):
     path.write_text(RECIPE.read_text().replace("objective:\n", "objective:\n  guessed_mask: true\n"))
     with pytest.raises(ValueError, match="unknown objective keys"):
         load_recipe(path)
+
+
+def test_recipe_identity_hashes_resolved_defaults_not_yaml_spelling(tmp_path):
+    original = load_recipe(RECIPE)
+    explicit_path = tmp_path / "explicit-default.yaml"
+    explicit_path.write_text(
+        RECIPE.read_text().replace("  truncation: right\n", "  truncation: right\n  truncation_min_context_tokens: 0\n")
+    )
+    explicit = load_recipe(explicit_path)
+    assert explicit.identity_hash == original.identity_hash
+    assert explicit.public_dict() == original.public_dict()

@@ -22,6 +22,9 @@ immutable in the checked-in recipe.
   token IDs exactly.
 - Ordered role/part/span/tool loss rules, fractional weights, explicit causal
   target shifting, and globally additive numerator/denominator reduction.
+- Loss-aware truncation that maximizes retained configured objective weight,
+  reserves an explicit prefix-context budget, and records every dropped input
+  token, selected token, and unit of objective weight.
 - One visible `train_sft.py` loop with gradient accumulation, rematerialization,
   clipping, AdamW, cosine scheduling, rank-disjoint streaming data, structured
   artifacts, replicated data parallelism, and strict checkpoint/resume.
@@ -30,7 +33,7 @@ immutable in the checked-in recipe.
 - CPU tests, forced four-device CPU smoke, optional Transformers/PyTorch parity,
   and a frozen `uv.lock`.
 
-The initial validation gates pass for 29 offline unit tests; byte/token template
+The initial validation gates pass for 33 offline unit tests; byte/token template
 parity; tiny-model valid-logit/loss/gradient/AdamW-step parity against
 Transformers and PyTorch; and an exact 320-tensor,
 752,393,024-parameter public-checkpoint audit. A measured single-host v4-8 run
@@ -40,6 +43,14 @@ steady step took 0.403 seconds (2,538 input tokens/s). See the
 [sanitized result](docs/results/qwen35_v4_8_smoke.json). The original four-host
 slice was pre-empted, so multi-host initialization and checkpoint portability
 remain unproven.
+
+Checkpoint/resume was subsequently tested on the same v4-8. A synthetic
+interrupted run produced a byte-identical final checkpoint to its uninterrupted
+reference. A live-data Qwen3.5 checkpoint was 7,523,970,416 bytes; a fresh
+process verified its SHA-256, restored without reconstructing weights from
+safetensors, replayed the UltraChat cursor, and matched every step-3/4/5 metric
+from a same-source uninterrupted run. See the
+[resume result](docs/results/qwen35_v4_8_resume_smoke.json).
 
 ## Quick start
 
@@ -61,9 +72,9 @@ uv run python train_sft.py \
   --synthetic \
   --resume artifacts/qwen35-tiny-resume-smoke/checkpoints/step-00000002.pkl
 
-# Inspect the pinned production recipe without downloading weights.
+# Inspect the pinned, 32-token-context loss-aware recipe without downloading weights.
 uv run python train_sft.py \
-  --config configs/recipes/qwen35_0_8b_ultrachat_smoke.yaml \
+  --config configs/recipes/qwen35_0_8b_ultrachat_loss_aware_smoke.yaml \
   --dry-run
 ```
 
@@ -74,7 +85,7 @@ uv run jaxsft data explain \
   --row row.json \
   --adapter messages \
   --tokenizer /path/to/pinned/qwen3.5-snapshot \
-  --recipe configs/recipes/qwen35_0_8b_ultrachat_smoke.yaml
+  --recipe configs/recipes/qwen35_0_8b_ultrachat_loss_aware_smoke.yaml
 ```
 
 ## Four-host launch
@@ -92,7 +103,7 @@ python3.12 cluster.py sync \
   --profile configs/clusters/four-host-tpu.local.toml
 python3.12 cluster.py run \
   --profile configs/clusters/four-host-tpu.local.toml \
-  --recipe configs/recipes/qwen35_0_8b_ultrachat_smoke.yaml
+  --recipe configs/recipes/qwen35_0_8b_ultrachat_loss_aware_smoke.yaml
 python3.12 cluster.py status \
   --profile configs/clusters/four-host-tpu.local.toml
 ```
@@ -130,7 +141,8 @@ The initial run deliberately uses a readable recurrent DeltaNet reference
 kernel and replicated parameters. Single-process checkpoints atomically capture
 the model, optimizer, step, RNG cursor, and a deterministically replayable data
 cursor; the loader verifies a completion marker, SHA-256, recipe identity, and
-topology before unpickling trusted local state. Chunkwise TPU kernels,
+exact source/topology identity before unpickling trusted local state. Chunkwise
+TPU kernels,
 model-axis sharding, packing, portable multi-host checkpoints, LoRA, OLMo, Qwen
 MoE, and Kimi variants remain roadmap items. See [PLAN.md](PLAN.md) for their
 exit gates and [docs/DATA_CONTRACT.md](docs/DATA_CONTRACT.md) for the data/loss

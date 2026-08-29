@@ -268,7 +268,14 @@ def make_capsule() -> tuple[Path, str, list[str]]:
     capsule = Path(temporary.name)
     with tarfile.open(capsule, "w", format=tarfile.PAX_FORMAT) as archive:
         for relative in files:
-            archive.add(ROOT / relative, arcname=relative.as_posix(), recursive=False)
+            path = ROOT / relative
+            info = archive.gettarinfo(str(path), arcname=relative.as_posix())
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            info.mtime = 0
+            info.pax_headers = {}
+            with path.open("rb") as handle:
+                archive.addfile(info, handle)
     digest = hashlib.sha256(capsule.read_bytes()).hexdigest()
     return capsule, digest, [path.as_posix() for path in files]
 

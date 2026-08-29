@@ -59,6 +59,7 @@ class DataSpec:
 class TrainingSpec:
     max_length: int
     truncation: str
+    truncation_min_context_tokens: int
     per_device_batch_size: int
     gradient_accumulation_steps: int
     steps: int
@@ -149,6 +150,7 @@ def load_recipe(path: str | Path) -> Recipe:
     allowed_training = {
         "max_length",
         "truncation",
+        "truncation_min_context_tokens",
         "per_device_batch_size",
         "gradient_accumulation_steps",
         "steps",
@@ -168,6 +170,7 @@ def load_recipe(path: str | Path) -> Recipe:
     training_spec = TrainingSpec(
         max_length=int(training["max_length"]),
         truncation=str(training.get("truncation", "right")),
+        truncation_min_context_tokens=int(training.get("truncation_min_context_tokens", 0)),
         per_device_batch_size=int(training.get("per_device_batch_size", 1)),
         gradient_accumulation_steps=int(training.get("gradient_accumulation_steps", 1)),
         steps=int(training["steps"]),
@@ -193,8 +196,12 @@ def load_recipe(path: str | Path) -> Recipe:
             raise ValueError(f"training.{name} must be positive")
     if training_spec.max_length < 2:
         raise ValueError("training.max_length must be at least 2 for causal SFT")
-    if training_spec.truncation not in {"right", "left", "reject"}:
-        raise ValueError("training.truncation must be right, left, or reject")
+    if training_spec.truncation not in {"right", "left", "loss_aware", "reject"}:
+        raise ValueError("training.truncation must be right, left, loss_aware, or reject")
+    if not 0 <= training_spec.truncation_min_context_tokens < training_spec.max_length:
+        raise ValueError("training.truncation_min_context_tokens must be in [0, max_length)")
+    if training_spec.truncation != "loss_aware" and training_spec.truncation_min_context_tokens:
+        raise ValueError("training.truncation_min_context_tokens is only valid with loss_aware truncation")
     if not 0 <= training_spec.warmup_steps < training_spec.steps:
         raise ValueError("training.warmup_steps must be smaller than steps")
     if training_spec.checkpoint_every < 0:
@@ -212,15 +219,35 @@ def load_recipe(path: str | Path) -> Recipe:
     if not math.isfinite(training_spec.max_grad_norm) or training_spec.max_grad_norm <= 0:
         raise ValueError("training.max_grad_norm must be finite and positive")
 
-    objective = dict(raw["objective"])
+    objective_raw = dict(raw["objective"])
     from .data.tokenize import LossPolicy
 
-    LossPolicy.from_config(objective)
+    loss_policy = LossPolicy.from_config(objective_raw)
+    objective = {
+        "conflict_mode": loss_policy.conflict_mode,
+        "rules": [
+            {
+                "name": rule.name,
+                "select": rule.select,
+                "weight": rule.weight,
+                "require_match": rule.require_match,
+            }
+            for rule in loss_policy.rules
+        ],
+    }
 
     run = raw["run"]
     _strict(run, {"seed", "output_dir"}, "run")
     run_spec = RunSpec(seed=int(run.get("seed", 17)), output_dir=str(run["output_dir"]))
-    canonical = json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    resolved = {
+        "schema_version": 1,
+        "model": asdict(model_spec),
+        "data": asdict(data_spec),
+        "objective": objective,
+        "training": asdict(training_spec),
+        "run": asdict(run_spec),
+    }
+    canonical = json.dumps(resolved, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return Recipe(
         schema_version=1,
         model=model_spec,
@@ -229,5 +256,5 @@ def load_recipe(path: str | Path) -> Recipe:
         training=training_spec,
         run=run_spec,
         source_path=str(path.resolve()),
-        identity_hash=hashlib.sha256(canonical.encode()).hexdigest(),
+        identity_hash=hashlib.sha256(b"jaxsft-recipe-v1\0" + canonical.encode()).hexdigest(),
     )

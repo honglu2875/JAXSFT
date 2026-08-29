@@ -7,7 +7,8 @@ The repository spine and first executable vertical slice now exist. Completed:
 - JAXSFT naming, Apache-2.0 licensing, packaging, frozen environment, strict
   recipe, structured run artifacts, and controller lifecycle;
 - canonical messages/parts/tools, four source adapter families, exact Qwen3.5
-  text rendering, whole-sequence offset alignment, and selector-based weights;
+  text rendering, whole-sequence offset alignment, selector-based weights, and
+  loss-aware truncation with an explicit context budget;
 - a single-file dense Qwen3.5 text model, direct safetensors map, weighted loss,
   AdamW, one-/four-device CPU smoke, deterministic single-process resume, and
   optional Hugging Face parity tests;
@@ -20,11 +21,13 @@ exact 752,393,024-parameter audit. A v4-8 completed five live pinned UltraChat
 updates with finite loss/gradients; first backward compilation was about 101
 seconds and a measured steady step was 0.403 seconds (2,538 input tokens/s).
 Synthetic interruption at step 2 followed by a cold resume produced a
-byte-identical step-4 checkpoint to the uninterrupted run. The original
-four-host slice was pre-empted, so multi-host startup and portable checkpointing
-remain open. Packing, supervised-aware truncation, high-performance chunkwise
-DeltaNet, model-axis sharding, OLMo, and Kimi remain planned work rather than
-advertised support.
+byte-identical step-4 checkpoint to the uninterrupted run. A full 7.52 GB
+Qwen3.5 model/AdamW checkpoint also survived a fresh-process restore; its
+replayed UltraChat steps 3–5 matched the uninterrupted reference exactly. The
+original four-host slice was pre-empted, so multi-host startup and portable
+checkpointing remain open. Packing, complete-turn/tool-boundary truncation,
+high-performance chunkwise DeltaNet, model-axis sharding, OLMo, and Kimi remain
+planned work rather than advertised support.
 
 ## 1. Outcome
 

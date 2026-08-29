@@ -267,6 +267,23 @@ Every policy declares handling of dangling tool calls/results, incomplete
 reasoning/final pairs, BOS/EOS, and minimum selected tokens. Statistics and the
 pre/post sample IDs are recorded. Silent hard slicing is not a default.
 
+The implemented token-window baseline exposes `reject`, `right`, `left`, and
+`loss_aware`. `loss_aware` evaluates every fixed-length window after the loss
+policy has assigned weights. It maximizes retained objective weight while
+accounting for the fact that the first retained causal token cannot be scored;
+ties prefer the later target chunk and then the largest available prefix
+context. `training.truncation_min_context_tokens` can reserve a minimum number
+of tokens before the first retained target. If no window can satisfy that
+constraint, the run records a relaxation rather than silently pretending it
+was met.
+
+Every truncated sample carries its original/window lengths, original/retained
+selected-token counts and objective weight, retained context, and constraint
+status. Stream totals expose the same losses. This makes the policy suitable
+for objective-aware experiments, but it can still cut through a semantic turn
+or tool transaction. Complete-turn/tool-boundary policies remain a separate
+contract, not an implicit behavior of `loss_aware`.
+
 ## 10. Packing and attention
 
 Packing concatenates complete tokenized samples into fixed-length arrays while

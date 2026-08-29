@@ -132,4 +132,69 @@ def test_ordered_loss_policy_selects_only_assistant_content():
     selected = [meta for weight, meta in zip(tokenized.loss_weights, tokenized.metadata) if weight]
     assert selected
     assert all(meta.role == "assistant" and meta.span_class == "content" for meta in selected)
+    assert all(meta.loss_rule_indices == (0, 1) for meta in selected)
     assert set(weight for weight in tokenized.loss_weights if weight) == {2.0}
+
+
+def test_loss_aware_truncation_retains_later_target_on_weight_tie_and_records_loss():
+    document = RenderedDocument(
+        sample_id="long",
+        spans=(
+            RenderedSpan("u" * 10, None, "content", role="user"),
+            RenderedSpan("a" * 4, None, "content", role="assistant", default_weight=1.0),
+            RenderedSpan("x" * 10, None, "content", role="user"),
+            RenderedSpan("b" * 4, None, "content", role="assistant", default_weight=1.0),
+        ),
+        renderer="fixture",
+        renderer_version=1,
+    )
+
+    class Characters:
+        def encode(self, text, add_special_tokens=False):
+            return FakeEncoding(list(range(len(text))), [(i, i + 1) for i in range(len(text))], list(text))
+
+    tokenized = tokenize_document(
+        document,
+        Characters(),
+        tokenizer_hash="fixture",
+        max_length=10,
+        truncation="loss_aware",
+    )
+    assert tokenized.input_ids == tuple(range(18, 28))
+    assert tokenized.loss_weights == (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0)
+    record = tokenized.truncation_record
+    assert record is not None
+    assert (record.start, record.end) == (18, 28)
+    assert (record.original_selected_tokens, record.retained_selected_tokens) == (8, 4)
+    assert (record.original_weight, record.retained_weight) == (8.0, 4.0)
+
+
+def test_loss_aware_truncation_can_reserve_explicit_prefix_context():
+    document = RenderedDocument(
+        sample_id="context-budget",
+        spans=(
+            RenderedSpan("u" * 10, None, "content", role="user"),
+            RenderedSpan("a" * 18, None, "content", role="assistant", default_weight=1.0),
+        ),
+        renderer="fixture",
+        renderer_version=1,
+    )
+
+    class Characters:
+        def encode(self, text, add_special_tokens=False):
+            return FakeEncoding(list(range(len(text))), [(i, i + 1) for i in range(len(text))], list(text))
+
+    tokenized = tokenize_document(
+        document,
+        Characters(),
+        tokenizer_hash="fixture",
+        max_length=10,
+        truncation="loss_aware",
+        truncation_min_context_tokens=4,
+    )
+    assert tokenized.input_ids == tuple(range(6, 16))
+    assert tokenized.selected_tokens == 6
+    record = tokenized.truncation_record
+    assert record is not None
+    assert record.retained_context_tokens == 4
+    assert record.context_constraint_satisfied

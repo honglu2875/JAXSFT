@@ -36,8 +36,12 @@ def test_source_capsule_contains_research_code_and_excludes_generated_state():
     if worktree.returncode:
         pytest.skip("source capsule intentionally has no Git metadata")
     capsule, digest, files = cluster.make_capsule()
+    second_capsule, second_digest, second_files = cluster.make_capsule()
     try:
         assert len(digest) == 64
+        assert second_digest == digest
+        assert second_capsule.read_bytes() == capsule.read_bytes()
+        assert second_files == files
         assert "src/jaxsft/data/adapters.py" in files
         assert "src/jaxsft/models/qwen3_5.py" in files
         assert "uv.lock" in files
@@ -46,6 +50,7 @@ def test_source_capsule_contains_research_code_and_excludes_generated_state():
             assert sorted(archive.getnames()) == files
     finally:
         capsule.unlink(missing_ok=True)
+        second_capsule.unlink(missing_ok=True)
 
 
 def test_launch_dry_run_carries_capsule_identity(tmp_path, monkeypatch, capsys):

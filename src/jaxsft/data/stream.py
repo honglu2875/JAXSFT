@@ -23,6 +23,11 @@ class StreamCounters:
     adapter_errors_by_reason: dict[str, int] = field(default_factory=dict)
     length_rejections: int = 0
     zero_objective: int = 0
+    truncated_samples: int = 0
+    tokens_truncated: int = 0
+    selected_tokens_truncated: int = 0
+    selected_weight_truncated: float = 0.0
+    context_constraint_relaxations: int = 0
     epochs: int = 0
 
 
@@ -43,6 +48,7 @@ class InstructionBatchStream:
         accumulation_steps: int,
         max_length: int,
         truncation: str,
+        truncation_min_context_tokens: int = 0,
     ):
         self.spec = spec
         self.snapshot = tokenizer_snapshot
@@ -55,6 +61,7 @@ class InstructionBatchStream:
         self.accumulation_steps = accumulation_steps
         self.max_length = max_length
         self.truncation = truncation
+        self.truncation_min_context_tokens = truncation_min_context_tokens
         self.adapter = get_adapter(spec.adapter)
         self.counters = StreamCounters()
         self._iterator = self._make_iterator(epoch=0)
@@ -70,26 +77,29 @@ class InstructionBatchStream:
         """Return a replayable rank-local cursor for the pinned iterable."""
 
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "huggingface_stream_replay",
             "process_index": self.process_index,
             "process_count": self.process_count,
+            "tokenizer_hash": self.snapshot.identity_hash,
             "counters": asdict(self.counters),
         }
 
     def load_state_dict(self, raw: Mapping[str, Any]) -> None:
         """Restore by deterministically replaying the current epoch's prefix."""
 
-        allowed = {"schema_version", "kind", "process_index", "process_count", "counters"}
+        allowed = {"schema_version", "kind", "process_index", "process_count", "tokenizer_hash", "counters"}
         unknown = set(raw) - allowed
         if unknown:
             raise ValueError(f"unknown stream-state keys: {sorted(unknown)}")
-        if raw.get("schema_version") != 1 or raw.get("kind") != "huggingface_stream_replay":
+        if raw.get("schema_version") != 2 or raw.get("kind") != "huggingface_stream_replay":
             raise ValueError("unsupported instruction stream state")
         if int(raw.get("process_index", -1)) != self.process_index:
             raise ValueError("stream checkpoint process_index differs from this process")
         if int(raw.get("process_count", -1)) != self.process_count:
             raise ValueError("stream checkpoint process_count differs from this run")
+        if raw.get("tokenizer_hash") != self.snapshot.identity_hash:
+            raise ValueError("stream checkpoint tokenizer differs from this run")
         counters_raw = raw.get("counters")
         if not isinstance(counters_raw, Mapping):
             raise ValueError("stream checkpoint counters must be a mapping")
@@ -107,6 +117,11 @@ class InstructionBatchStream:
             adapter_errors_by_reason={str(key): int(value) for key, value in reasons.items()},
             length_rejections=int(counters_raw["length_rejections"]),
             zero_objective=int(counters_raw["zero_objective"]),
+            truncated_samples=int(counters_raw["truncated_samples"]),
+            tokens_truncated=int(counters_raw["tokens_truncated"]),
+            selected_tokens_truncated=int(counters_raw["selected_tokens_truncated"]),
+            selected_weight_truncated=float(counters_raw["selected_weight_truncated"]),
+            context_constraint_relaxations=int(counters_raw["context_constraint_relaxations"]),
             epochs=int(counters_raw["epochs"]),
         )
         numeric = (
@@ -116,6 +131,11 @@ class InstructionBatchStream:
             counters.adapter_errors,
             counters.length_rejections,
             counters.zero_objective,
+            counters.truncated_samples,
+            counters.tokens_truncated,
+            counters.selected_tokens_truncated,
+            counters.selected_weight_truncated,
+            counters.context_constraint_relaxations,
             counters.epochs,
             *counters.adapter_errors_by_reason.values(),
         )
@@ -198,6 +218,7 @@ class InstructionBatchStream:
                     policy=self.policy,
                     max_length=self.max_length,
                     truncation=self.truncation,
+                    truncation_min_context_tokens=self.truncation_min_context_tokens,
                 )
             except AdapterError as error:
                 self.counters.adapter_errors += 1
@@ -211,6 +232,16 @@ class InstructionBatchStream:
                     self.counters.length_rejections += 1
                     continue
                 raise
+            truncation = tokenized.truncation_record
+            if truncation is not None:
+                self.counters.truncated_samples += 1
+                self.counters.tokens_truncated += truncation.original_length - (truncation.end - truncation.start)
+                self.counters.selected_tokens_truncated += (
+                    truncation.original_selected_tokens - truncation.retained_selected_tokens
+                )
+                self.counters.selected_weight_truncated += truncation.original_weight - truncation.retained_weight
+                if not truncation.context_constraint_satisfied:
+                    self.counters.context_constraint_relaxations += 1
             if tokenized.selected_tokens == 0:
                 self.counters.zero_objective += 1
                 continue

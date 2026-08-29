@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "date_utc": "2026-08-29",
+  "purpose": "single-process checkpoint and exact-resume correctness proof",
+  "checkpoint_schema_version": 2,
+  "source": {
+    "git_commit": "67d221a7e0c3638a72b956197234415f630d46e9",
+    "capsule_sha256": "4e14a2816e191a20d0873f46ef9214a2c9667e520461aa5f506a5dd49e29a6fb"
+  },
+  "topology": {
+    "accelerator": "v4-8",
+    "process_count": 1,
+    "local_device_count": 4,
+    "global_device_count": 4,
+    "parameter_placement": "replicated"
+  },
+  "synthetic_replay": {
+    "interrupted_after_step": 2,
+    "completed_step": 4,
+    "uninterrupted_checkpoint_sha256": "e6ba3daf655f4cccd56b7f6591d4e1ce21325ba6dcf90016a8b8fd55e7eaeddf",
+    "resumed_checkpoint_sha256": "e6ba3daf655f4cccd56b7f6591d4e1ce21325ba6dcf90016a8b8fd55e7eaeddf",
+    "byte_identical": true
+  },
+  "full_model_replay": {
+    "model_repo_id": "Qwen/Qwen3.5-0.8B-Base",
+    "model_revision": "dc7cdfe2ee4154fa7e30f5b51ca41bfa40174e68",
+    "data_repo_id": "HuggingFaceH4/ultrachat_200k",
+    "data_revision": "8049631c405ae6576f93f445c6b8166f76f5505a",
+    "interrupted_after_step": 2,
+    "checkpoint_bytes": 7523970416,
+    "checkpoint_sha256": "936212a0c484e8285c65e5a7fc6e643dd7d2df1f76b1c1cadd94a8e3d06fdb96",
+    "checkpoint_write_and_hash_seconds_approx": 13.09,
+    "cursor_at_checkpoint": {
+      "rows_seen": 11,
+      "rows_seen_in_epoch": 11,
+      "rows_emitted": 8,
+      "adapter_errors": 1,
+      "zero_objective": 2
+    },
+    "cold_resume": {
+      "start_step": 2,
+      "completed_step": 5,
+      "checkpoint_hash_verified_before_unpickle": true,
+      "safetensor_weights_reloaded": false,
+      "stream_prefix_rows_replayed": 11,
+      "steps_3_through_5_match_uninterrupted_reference": true,
+      "final_step": {
+        "loss": 1.3128104209899902,
+        "loss_numerator": 941.2850952148438,
+        "loss_denominator": 717.0,
+        "selected_accuracy": 0.6415620446205139,
+        "gradient_norm_before_clipping": 19.07508087158203,
+        "learning_rate": 4.636039648175938e-06,
+        "input_tokens": 1024
+      },
+      "final_cursor": {
+        "rows_seen": 28,
+        "rows_seen_in_epoch": 28,
+        "rows_emitted": 20,
+        "adapter_errors": 2,
+        "zero_objective": 6
+      }
+    }
+  },
+  "capsule_validation": {
+    "ruff": "passed",
+    "unit_tests_passed": 28,
+    "unit_tests_skipped": 1,
+    "skip_reason": "Git source-capsule test is inapplicable because immutable capsules intentionally omit .git",
+    "compileall": "passed"
+  },
+  "limitations": [
+    "This validates one JAX process with four local TPU devices, not multi-host checkpoint portability.",
+    "The checkpoint is a trusted local pickle and must not be loaded from an untrusted source.",
+    "Iterable resume replays the pinned epoch prefix and therefore scales linearly with consumed rows.",
+    "Private host inventory and credentials are intentionally omitted."
+  ]
+}

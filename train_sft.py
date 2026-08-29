@@ -26,6 +26,9 @@ from jaxsft.loss import causal_loss_statistics
 from jaxsft.optim import AdamWHyperparameters, AdamWState, adamw_init, adamw_update, cosine_learning_rate
 
 
+CHECKPOINT_SCHEMA_VERSION = 3
+
+
 def _json_default(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
@@ -47,21 +50,55 @@ def atomic_json(path: Path, payload: Any) -> None:
 
 
 def git_identity(root: Path) -> dict[str, Any]:
-    def run(*arguments: str) -> str | None:
+    def run(*arguments: str, strip: bool = True) -> str | None:
         result = subprocess.run(
             ["git", *arguments], cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False
         )
-        return result.stdout.strip() if result.returncode == 0 else None
+        if result.returncode:
+            return None
+        return result.stdout.strip() if strip else result.stdout.rstrip("\n")
 
     head = run("rev-parse", "HEAD")
-    status = run("status", "--porcelain=v1") or ""
+    status = run("status", "--porcelain=v1", strip=False) or ""
     diff = run("diff", "--binary", "HEAD") if head else status
+    material = hashlib.sha256((diff or "").encode())
+    untracked = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if untracked.returncode == 0:
+        for raw_path in sorted(part for part in untracked.stdout.split(b"\0") if part):
+            relative = Path(os.fsdecode(raw_path))
+            unresolved = root / relative
+            resolved = unresolved.resolve()
+            if unresolved.is_symlink() or root not in resolved.parents or not resolved.is_file():
+                raise RuntimeError(f"untracked source identity entry is unsafe: {relative}")
+            material.update(b"\0untracked\0")
+            material.update(raw_path)
+            with resolved.open("rb") as handle:
+                for block in iter(lambda: handle.read(1024 * 1024), b""):
+                    material.update(block)
     return {
         "head": head,
         "dirty": bool(status),
         "status": status.splitlines(),
-        "dirty_material_sha256": hashlib.sha256((diff or "").encode()).hexdigest(),
+        "dirty_material_sha256": material.hexdigest(),
     }
+
+
+def checkpoint_source_identity(root: Path) -> dict[str, Any]:
+    capsule_sha256 = os.environ.get("JAXSFT_SOURCE_SHA256")
+    if capsule_sha256:
+        if len(capsule_sha256) != 64 or any(character not in "0123456789abcdef" for character in capsule_sha256):
+            raise ValueError("JAXSFT_SOURCE_SHA256 must be a lowercase SHA-256 digest")
+        return {"kind": "source_capsule", "sha256": capsule_sha256}
+    identity = git_identity(root)
+    if identity["head"] is None:
+        raise RuntimeError("checkpointing requires Git metadata or JAXSFT_SOURCE_SHA256")
+    return {"kind": "git_worktree", **identity}
 
 
 def resolve_model_snapshot(recipe: Recipe) -> Path:
@@ -141,7 +178,8 @@ def save_checkpoint(
     optimizer: object,
     *,
     recipe_identity_hash: str,
-    process_count: int,
+    source_identity: dict[str, Any],
+    topology: dict[str, Any],
     data_state: dict[str, Any],
     rng_state: dict[str, Any],
 ) -> Path:
@@ -149,7 +187,7 @@ def save_checkpoint(
 
     if step <= 0:
         raise ValueError("checkpoint step must be positive")
-    if process_count != 1:
+    if int(topology.get("process_count", -1)) != 1:
         raise ValueError("replicated checkpoint format supports exactly one JAX process")
     checkpoint_dir = output_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -160,10 +198,11 @@ def save_checkpoint(
     temporary = target.with_name(target.name + f".tmp-{os.getpid()}")
     host_state = jax.device_get(
         {
-            "schema_version": 2,
+            "schema_version": CHECKPOINT_SCHEMA_VERSION,
             "step": step,
             "recipe_identity_hash": recipe_identity_hash,
-            "process_count": process_count,
+            "source_identity": source_identity,
+            "topology": topology,
             "params": params,
             "optimizer": optimizer,
             "data_state": data_state,
@@ -182,19 +221,24 @@ def save_checkpoint(
     atomic_json(
         marker_path,
         {
-            "schema_version": 2,
+            "schema_version": CHECKPOINT_SCHEMA_VERSION,
             "step": step,
             "file": target.name,
             "sha256": _file_sha256(target),
             "recipe_identity_hash": recipe_identity_hash,
-            "process_count": process_count,
+            "source_identity": source_identity,
+            "topology": topology,
         },
     )
     return target
 
 
 def load_checkpoint(
-    path: str | Path, *, recipe_identity_hash: str, process_count: int
+    path: str | Path,
+    *,
+    recipe_identity_hash: str,
+    source_identity: dict[str, Any],
+    topology: dict[str, Any],
 ) -> dict[str, Any]:
     """Load a trusted local checkpoint after marker, hash, and identity checks."""
 
@@ -203,7 +247,7 @@ def load_checkpoint(
     if not path.is_file() or not marker_path.is_file():
         raise FileNotFoundError(f"checkpoint and completion marker are required: {path}")
     marker = json.loads(marker_path.read_text())
-    if not isinstance(marker, dict) or marker.get("schema_version") != 2:
+    if not isinstance(marker, dict) or marker.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("unsupported checkpoint completion marker")
     if marker.get("file") != path.name:
         raise ValueError("checkpoint marker names a different payload")
@@ -211,18 +255,22 @@ def load_checkpoint(
         raise ValueError("checkpoint SHA-256 does not match its completion marker")
     if marker.get("recipe_identity_hash") != recipe_identity_hash:
         raise ValueError("checkpoint recipe identity differs from this recipe")
-    if int(marker.get("process_count", -1)) != process_count:
-        raise ValueError("checkpoint process count differs from this run")
+    if marker.get("source_identity") != source_identity:
+        raise ValueError("checkpoint source identity differs from this run")
+    if marker.get("topology") != topology:
+        raise ValueError("checkpoint topology differs from this run")
     # Pickle is intentionally limited to checkpoints created and trusted by the
     # same experiment. Never load an untrusted checkpoint path.
     with path.open("rb") as handle:
         payload = pickle.load(handle)
-    if not isinstance(payload, dict) or payload.get("schema_version") != 2:
+    if not isinstance(payload, dict) or payload.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("unsupported checkpoint payload")
     if payload.get("recipe_identity_hash") != recipe_identity_hash:
         raise ValueError("checkpoint payload recipe identity differs from this recipe")
-    if int(payload.get("process_count", -1)) != process_count:
-        raise ValueError("checkpoint payload process count differs from this run")
+    if payload.get("source_identity") != source_identity:
+        raise ValueError("checkpoint payload source identity differs from this run")
+    if payload.get("topology") != topology:
+        raise ValueError("checkpoint payload topology differs from this run")
     payload_step = int(payload.get("step", -1))
     if payload_step < 0:
         raise ValueError("checkpoint step must be non-negative")
@@ -267,14 +315,17 @@ def validate_rng_checkpoint(raw: object, *, seed: int, expected_step: int) -> No
         raise ValueError("checkpoint RNG cursor differs from checkpoint step")
 
 
-def load_synthetic_cursor(raw: object, *, expected_step: int) -> int:
-    if not isinstance(raw, dict) or set(raw) != {"schema_version", "kind", "batches_consumed"}:
+def load_synthetic_cursor(raw: object, *, expected_step: int, length: int, vocab_size: int) -> int:
+    expected_fields = {"schema_version", "kind", "batches_consumed", "length", "vocab_size"}
+    if not isinstance(raw, dict) or set(raw) != expected_fields:
         raise ValueError("synthetic data checkpoint has unexpected fields")
-    if raw.get("schema_version") != 1 or raw.get("kind") != "synthetic":
+    if raw.get("schema_version") != 2 or raw.get("kind") != "synthetic":
         raise ValueError("unsupported synthetic data checkpoint")
     batches_consumed = int(raw.get("batches_consumed", -1))
     if batches_consumed != expected_step:
         raise ValueError("synthetic batch cursor differs from checkpoint step")
+    if int(raw.get("length", -1)) != length or int(raw.get("vocab_size", -1)) != vocab_size:
+        raise ValueError("synthetic data shape differs from checkpoint")
     return batches_consumed
 
 
@@ -370,6 +421,15 @@ def run(args: argparse.Namespace) -> int:
     local_device_count, global_device_count = jax.local_device_count(), jax.device_count()
     if int(os.environ.get("JAXSFT_PROCESS_COUNT", process_count)) != process_count:
         raise RuntimeError("declared and initialized JAX process counts differ")
+    topology = {
+        "process_index": process_index,
+        "process_count": process_count,
+        "local_device_count": local_device_count,
+        "global_device_count": global_device_count,
+        "backend": jax.default_backend(),
+        "devices": [str(device) for device in jax.local_devices()],
+    }
+    source_identity = checkpoint_source_identity(Path(__file__).resolve().parent)
 
     checkpoint_requested = bool(recipe.training.checkpoint_every or args.resume or args.stop_after_step is not None)
     if process_count > 1 and checkpoint_requested:
@@ -384,7 +444,8 @@ def run(args: argparse.Namespace) -> int:
         restored = load_checkpoint(
             args.resume,
             recipe_identity_hash=recipe.identity_hash,
-            process_count=process_count,
+            source_identity=source_identity,
+            topology=topology,
         )
         start_step = int(restored["step"])
         validate_rng_checkpoint(restored["rng_state"], seed=recipe.run.seed, expected_step=start_step)
@@ -423,14 +484,6 @@ def run(args: argparse.Namespace) -> int:
     output_override = os.environ.get("JAXSFT_OUTPUT_DIR")
     output_dir = Path(output_override or recipe.run.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    topology = {
-        "process_index": process_index,
-        "process_count": process_count,
-        "local_device_count": local_device_count,
-        "global_device_count": global_device_count,
-        "backend": jax.default_backend(),
-        "devices": [str(device) for device in jax.local_devices()],
-    }
     emit(
         "initialized",
         rank=process_index,
@@ -446,12 +499,8 @@ def run(args: argparse.Namespace) -> int:
                 packages[package] = importlib.metadata.version(package)
             except importlib.metadata.PackageNotFoundError:
                 packages[package] = None
-        source_identity = git_identity(Path(__file__).resolve().parent)
-        capsule_sha256 = os.environ.get("JAXSFT_SOURCE_SHA256")
-        if capsule_sha256:
-            source_identity["capsule_sha256"] = capsule_sha256
         manifest = {
-            "schema_version": 2,
+            "schema_version": 3,
             "recipe": recipe.public_dict(),
             "model": {"repo_id": recipe.model.repo_id, "revision": recipe.model.revision},
             "data": {"repo_id": recipe.data.repo_id, "revision": recipe.data.revision},
@@ -463,12 +512,24 @@ def run(args: argparse.Namespace) -> int:
             if args.resume is None
             else {"checkpoint": str(Path(args.resume).expanduser().resolve()), "start_step": start_step},
             "requested_stop_step": stop_step,
+            "execution": {
+                "synthetic": args.synthetic,
+                "synthetic_length": args.synthetic_length if args.synthetic else None,
+                "synthetic_vocab_size": args.synthetic_vocab_size if args.synthetic else None,
+            },
         }
         atomic_json(output_dir / "run-manifest.json", manifest)
 
     if args.synthetic:
         synthetic_batches_consumed = (
-            0 if restored is None else load_synthetic_cursor(restored["data_state"], expected_step=start_step)
+            0
+            if restored is None
+            else load_synthetic_cursor(
+                restored["data_state"],
+                expected_step=start_step,
+                length=min(recipe.training.max_length, args.synthetic_length),
+                vocab_size=args.synthetic_vocab_size,
+            )
         )
 
         def next_batch():
@@ -487,9 +548,11 @@ def run(args: argparse.Namespace) -> int:
 
         def current_data_state():
             return {
-                "schema_version": 1,
+                "schema_version": 2,
                 "kind": "synthetic",
                 "batches_consumed": synthetic_batches_consumed,
+                "length": min(recipe.training.max_length, args.synthetic_length),
+                "vocab_size": args.synthetic_vocab_size,
             }
 
         counters = None
@@ -510,6 +573,7 @@ def run(args: argparse.Namespace) -> int:
             accumulation_steps=recipe.training.gradient_accumulation_steps,
             max_length=recipe.training.max_length,
             truncation=recipe.training.truncation,
+            truncation_min_context_tokens=recipe.training.truncation_min_context_tokens,
         )
         if restored is not None:
             stream.load_state_dict(restored["data_state"])
@@ -579,7 +643,8 @@ def run(args: argparse.Namespace) -> int:
                     params,
                     optimizer,
                     recipe_identity_hash=recipe.identity_hash,
-                    process_count=process_count,
+                    source_identity=source_identity,
+                    topology=topology,
                     data_state=current_data_state(),
                     rng_state={
                         "schema_version": 1,

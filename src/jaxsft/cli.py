@@ -36,6 +36,7 @@ def data_explain(args: argparse.Namespace) -> int:
         policy=policy,
         max_length=args.max_length,
         truncation=args.truncation,
+        truncation_min_context_tokens=args.truncation_min_context_tokens,
     )
     print(explain_tokens(document, tokenized, encoder))
     return 0
@@ -72,7 +73,12 @@ def build_parser() -> argparse.ArgumentParser:
     explain.add_argument("--split", default="local")
     explain.add_argument("--row-index", type=int, default=0)
     explain.add_argument("--max-length", type=int)
-    explain.add_argument("--truncation", choices=("reject", "right", "left"), default="reject")
+    explain.add_argument(
+        "--truncation",
+        choices=("reject", "right", "left", "loss_aware"),
+        default="reject",
+    )
+    explain.add_argument("--truncation-min-context-tokens", type=int, default=0)
     explain.set_defaults(function=data_explain)
 
     model = groups.add_parser("model")

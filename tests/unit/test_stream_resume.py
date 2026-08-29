@@ -1,4 +1,5 @@
 from dataclasses import asdict
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,6 +10,7 @@ class FakeReplayStream(InstructionBatchStream):
     def __init__(self, *, process_index=0, process_count=1):
         self.process_index = process_index
         self.process_count = process_count
+        self.snapshot = SimpleNamespace(identity_hash="fixture-tokenizer")
         self.counters = StreamCounters()
         self._iterator = self._make_iterator(epoch=0)
 

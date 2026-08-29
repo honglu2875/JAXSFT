@@ -31,6 +31,8 @@ pinned Hugging Face cache, and passed:
 - a five-step 25,152-parameter synthetic update across all four devices;
 - a five-step, 752,393,024-parameter Qwen3.5/UltraChat SFT run with finite loss
   and gradient norms;
+- a 7.52 GB full model/AdamW/data-cursor checkpoint, cold restore, and exact
+  continued metric trajectory against an uninterrupted reference;
 - artifact collection back to the controller.
 
 The real run's first backward compile took about 101 seconds. A measured steady
@@ -39,6 +41,8 @@ four. This is a correctness smoke, not a benchmark: it uses replicated full
 parameters and the readable sequential DeltaNet kernel. The public,
 hostname-free record is
 [docs/results/qwen35_v4_8_smoke.json](results/qwen35_v4_8_smoke.json).
+Checkpoint details are recorded separately in
+[docs/results/qwen35_v4_8_resume_smoke.json](results/qwen35_v4_8_resume_smoke.json).
 
 Operationally, TPU logs had to be directed to a writable run-local directory.
 A stale system lock file was removed only after confirming that no process held
@@ -113,6 +117,10 @@ contains:
 - tracked files plus non-ignored untracked files from the exact working tree;
 - entry program and resolved recipe;
 - dependency lock and capsule manifest/hashes.
+
+Tar ownership and timestamps are normalized, so identical source paths,
+contents, and executable modes produce the same capsule bytes and source
+identity across fresh clones.
 
 Ignored caches, data, checkpoints, secrets, `.git`, and virtual environments are
 excluded. Symlinks and files outside the checkout are rejected unless an
@@ -205,13 +213,15 @@ the eventual durable checkpoint backend.
 
 ## 7. Checkpoint storage
 
-Portable multi-host checkpoint semantics remain an M3 blocker. The schema-v2
+Portable multi-host checkpoint semantics remain an M3 blocker. The schema-v3
 baseline supports one JAX process, including multiple local devices, and
 explicitly rejects checkpoint/resume when `jax.process_count() > 1`. It writes
-parameters, AdamW state, step, RNG cursor, and data cursor to a temporary file,
-promotes it atomically, then writes a SHA-256 completion marker. Restore checks
-the marker, hash, recipe identity, and process count before loading trusted
-local pickle state. The production multi-host contract requires one of:
+parameters, AdamW state, step, RNG cursor, data cursor, exact source identity,
+and backend/device topology to a temporary file, promotes it atomically, then
+writes a SHA-256 completion marker. Restore checks the marker, hash, resolved
+recipe, source, topology, synthetic shape or tokenizer identity, and cursor
+before loading trusted local pickle state. The production multi-host contract
+requires one of:
 
 1. a shared filesystem/object-store backend supported by the chosen checkpoint
    implementation;
