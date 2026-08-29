@@ -6,6 +6,7 @@ from jaxsft.config import load_recipe
 
 
 RECIPE = Path(__file__).parents[2] / "configs" / "recipes" / "qwen35_0_8b_ultrachat_smoke.yaml"
+OLMO_RECIPE = Path(__file__).parents[2] / "configs" / "recipes" / "olmo2_1b_ultrachat_loss_aware_smoke.yaml"
 
 
 def test_smoke_recipe_is_pinned_and_strict():
@@ -47,3 +48,12 @@ def test_recipe_identity_hashes_resolved_defaults_not_yaml_spelling(tmp_path):
     explicit = load_recipe(explicit_path)
     assert explicit.identity_hash == original.identity_hash
     assert explicit.public_dict() == original.public_dict()
+
+
+def test_olmo_recipe_pins_model_dataset_and_template_dialect():
+    recipe = load_recipe(OLMO_RECIPE)
+    assert recipe.model.architecture == "olmo2"
+    assert recipe.model.repo_id == "allenai/OLMo-2-0425-1B"
+    assert len(recipe.model.revision) == 40
+    assert recipe.data.renderer == "olmo2_instruct"
+    assert recipe.training.truncation == "loss_aware"

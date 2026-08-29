@@ -51,6 +51,7 @@ class DataSpec:
     config: str
     split: str
     adapter: str
+    renderer: str | None = None
     shuffle_seed: int = 17
     shuffle_buffer_size: int = 10_000
 
@@ -96,6 +97,8 @@ class Recipe:
     def public_dict(self) -> dict[str, Any]:
         result = asdict(self)
         result.pop("source_path", None)
+        if result["data"]["renderer"] is None:
+            result["data"].pop("renderer")
         return result
 
 
@@ -121,8 +124,8 @@ def load_recipe(path: str | Path) -> Recipe:
         dtype=str(model.get("dtype", "bfloat16")),
         local_path=model.get("local_path"),
     )
-    if model_spec.architecture != "qwen3_5":
-        raise ValueError("this executable baseline currently supports architecture: qwen3_5")
+    if model_spec.architecture not in {"qwen3_5", "olmo2"}:
+        raise ValueError("supported model architectures are: olmo2, qwen3_5")
     if model_spec.dtype not in {"bfloat16", "float32"}:
         raise ValueError("model.dtype must be bfloat16 or float32")
     if not model_spec.repo_id or not model_spec.revision:
@@ -131,7 +134,16 @@ def load_recipe(path: str | Path) -> Recipe:
     data = raw["data"]
     _strict(
         data,
-        {"repo_id", "revision", "config", "split", "adapter", "shuffle_seed", "shuffle_buffer_size"},
+        {
+            "repo_id",
+            "revision",
+            "config",
+            "split",
+            "adapter",
+            "renderer",
+            "shuffle_seed",
+            "shuffle_buffer_size",
+        },
         "data",
     )
     data_spec = DataSpec(
@@ -140,9 +152,12 @@ def load_recipe(path: str | Path) -> Recipe:
         config=str(data.get("config", "default")),
         split=str(data["split"]),
         adapter=str(data["adapter"]),
+        renderer=None if data.get("renderer") is None else str(data["renderer"]),
         shuffle_seed=int(data.get("shuffle_seed", 17)),
         shuffle_buffer_size=int(data.get("shuffle_buffer_size", 10_000)),
     )
+    if data_spec.renderer not in {None, "qwen3_5", "olmo2_instruct"}:
+        raise ValueError("data.renderer must be qwen3_5 or olmo2_instruct")
     if data_spec.shuffle_buffer_size <= 0:
         raise ValueError("data.shuffle_buffer_size must be positive")
 
@@ -239,10 +254,15 @@ def load_recipe(path: str | Path) -> Recipe:
     run = raw["run"]
     _strict(run, {"seed", "output_dir"}, "run")
     run_spec = RunSpec(seed=int(run.get("seed", 17)), output_dir=str(run["output_dir"]))
+    resolved_data = asdict(data_spec)
+    if resolved_data["renderer"] is None:
+        # Preserve schema-1 identities from before renderers became explicit.
+        # An omitted renderer retains the architecture-derived legacy behavior.
+        resolved_data.pop("renderer")
     resolved = {
         "schema_version": 1,
         "model": asdict(model_spec),
-        "data": asdict(data_spec),
+        "data": resolved_data,
         "objective": objective,
         "training": asdict(training_spec),
         "run": asdict(run_spec),

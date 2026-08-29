@@ -5,21 +5,26 @@ models in JAX. It keeps message, reasoning, tool-call, tool-result, and template
 ownership attached to tokens so loss policies can be changed without rewriting
 the dataset or trainer.
 
-The executable baseline targets text-only `Qwen/Qwen3.5-0.8B-Base` on the
-pinned `HuggingFaceH4/ultrachat_200k` `train_sft` split. Both Hub revisions are
-immutable in the checked-in recipe.
+The executable baselines target text-only `Qwen/Qwen3.5-0.8B-Base` and
+`allenai/OLMo-2-0425-1B` on the pinned `HuggingFaceH4/ultrachat_200k`
+`train_sft` split. Every Hub reference and model template choice is immutable
+in its checked-in recipe or renderer identity.
 
 ## What works now
 
 - Pure-JAX dense Qwen3.5 in one model file: Gated DeltaNet, gated full
   attention, dense SwiGLU, direct safetensors mapping, strict shape checks, and
   a tied language-model head.
+- Pure-JAX OLMo 2 in one independent model file: grouped-query attention, full
+  RoPE, q/k and post-sublayer RMS norms, SwiGLU, an untied head, and strict
+  179-tensor public-checkpoint conversion.
 - Standard messages, prompt/completion, ShareGPT, UltraChat, OpenAI tool calls,
   Anthropic-style typed blocks, reasoning, and tool-result adapters into one
   immutable conversation IR.
-- Byte-exact Qwen3.5 rendering and whole-document tokenizer offset alignment.
-  A multi-turn reasoning/tool fixture matches Hugging Face rendered text and
-  token IDs exactly.
+- Byte-exact Qwen3.5 and OLMo 2 Instruct rendering plus whole-document tokenizer
+  offset alignment. Qwen's multi-turn reasoning/tool fixture and OLMo's plain
+  conversation fixture match Hugging Face rendered text and token IDs exactly;
+  unsupported OLMo tool/reasoning semantics are rejected.
 - Ordered role/part/span/tool loss rules, fractional weights, explicit causal
   target shifting, and globally additive numerator/denominator reduction.
 - Loss-aware truncation that maximizes retained configured objective weight,
@@ -33,13 +38,13 @@ immutable in the checked-in recipe.
 - CPU tests, forced four-device CPU smoke, optional Transformers/PyTorch parity,
   and a frozen `uv.lock`.
 
-The initial validation gates pass for 33 offline unit tests; byte/token template
-parity; tiny-model valid-logit/loss/gradient/AdamW-step parity against
-Transformers and PyTorch; and an exact 320-tensor,
+The validation gates pass for 42 offline unit tests; byte/token template parity;
+and tiny-model valid-logit/loss/gradient/AdamW-step parity against Transformers
+and PyTorch for both architectures. Qwen has an exact 320-tensor,
 752,393,024-parameter public-checkpoint audit. A measured single-host v4-8 run
-completed five live UltraChat updates across four TPU devices with finite loss
-and gradients. The first backward compile took about 101 seconds; a measured
-steady step took 0.403 seconds (2,538 input tokens/s). See the
+completed five live Qwen UltraChat updates across four TPU devices with finite
+loss and gradients. The first backward compile took about 101 seconds; a
+measured steady step took 0.403 seconds (2,538 input tokens/s). See the
 [sanitized result](docs/results/qwen35_v4_8_smoke.json). The original four-host
 slice was pre-empted, so multi-host initialization and checkpoint portability
 remain unproven.
@@ -57,6 +62,15 @@ stream. It emitted 20 samples after 22 rows with zero zero-objective drops,
 versus 28 rows and six zero-objective drops under right truncation; all 19
 truncated emitted samples met the context constraint. See the
 [loss-aware result](docs/results/qwen35_v4_8_loss_aware_smoke.json).
+
+OLMo 2 then exercised the same trainer without a Qwen-specific branch. Its
+1,484,916,736-parameter base checkpoint passed a complete 179-tensor audit and
+an all-100,352-logit float32 comparison against Transformers (`rtol=atol=2e-4`,
+maximum absolute error 0.0007782). Three real loss-aware UltraChat updates fit
+the same v4-8 with finite metrics, and a tiny cold-resume checkpoint was
+byte-identical to an uninterrupted reference. See the
+[model card](docs/models/olmo2.md) and
+[sanitized result](docs/results/olmo2_1b_v4_8_smoke.json).
 
 ## Quick start
 
@@ -82,6 +96,11 @@ uv run python train_sft.py \
 uv run python train_sft.py \
   --config configs/recipes/qwen35_0_8b_ultrachat_loss_aware_smoke.yaml \
   --dry-run
+
+# Exercise the same trainer with the tiny OLMo 2 architecture, offline.
+JAX_PLATFORMS=cpu uv run python train_sft.py \
+  --config configs/recipes/olmo2_1b_ultrachat_loss_aware_smoke.yaml \
+  --synthetic --synthetic-length 32
 ```
 
 Inspect one dataset row all the way through span ownership and token weights:
@@ -115,9 +134,12 @@ python3.12 cluster.py status \
 ```
 
 All workers install the frozen environment and cache Hub/JAX state under the
-profile's dedicated run/cache roots. The launcher never changes SSH keys,
-modifies host-wide packages, overwrites an existing run directory, or kills by
-process name.
+profile's dedicated run/cache roots. A worker without `uv` receives the
+controller's exact executable at a SHA-addressed cache path; nothing is
+installed into system Python. The launcher never changes SSH keys, modifies
+host-wide packages, overwrites an existing run directory, or kills by process
+name. Add `--synthetic` to `cluster.py run` for a tiny architecture/topology
+smoke before resolving public weights.
 
 ## Repository map
 
@@ -128,11 +150,14 @@ configs/recipes/                     strict, immutable experiments
 configs/clusters/                    public profile examples
 src/jaxsft/data/                     IR, adapters, renderer, aligner, stream
 src/jaxsft/models/qwen3_5.py         complete dense Qwen3.5 text model
+src/jaxsft/models/olmo2.py           complete dense OLMo 2 text model
+src/jaxsft/models/registry.py        explicit trainer dispatch only
 src/jaxsft/loss.py                   additive weighted causal objective
 src/jaxsft/optim.py                  visible AdamW and schedule
 tests/unit/                          offline CPU contracts
 tests/parity/                        Hugging Face numerical/token oracles
-docs/                                architecture contracts and roadmap
+docs/MODELS.md                       evidence-based compatibility table
+docs/                                architecture contracts, cards, results, roadmap
 ```
 
 ## Research contract
@@ -149,8 +174,8 @@ the model, optimizer, step, RNG cursor, and a deterministically replayable data
 cursor; the loader verifies a completion marker, SHA-256, recipe identity, and
 exact source/topology identity before unpickling trusted local state. Chunkwise
 TPU kernels,
-model-axis sharding, packing, portable multi-host checkpoints, LoRA, OLMo, Qwen
-MoE, and Kimi variants remain roadmap items. See [PLAN.md](PLAN.md) for their
+model-axis sharding, packing, portable multi-host checkpoints, LoRA, Qwen MoE,
+and Kimi variants remain roadmap items. See [PLAN.md](PLAN.md) for their
 exit gates and [docs/DATA_CONTRACT.md](docs/DATA_CONTRACT.md) for the data/loss
 invariants.
 

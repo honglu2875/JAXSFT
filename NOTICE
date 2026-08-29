@@ -7,3 +7,7 @@ Apache-2.0-licensed Hugging Face Transformers Qwen3.5 implementation.
 
 The controller orchestration design draws on the Apache-2.0-licensed RIG
 project by Honglu Fan (https://github.com/honglu2875/rig).
+
+The OLMo 2 mathematical implementation is checked against the
+Apache-2.0-licensed Hugging Face Transformers OLMo 2 implementation and
+AllenAI's Apache-2.0 OLMo 2 checkpoints.

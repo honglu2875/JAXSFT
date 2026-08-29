@@ -43,6 +43,7 @@ def test_source_capsule_contains_research_code_and_excludes_generated_state():
         assert second_capsule.read_bytes() == capsule.read_bytes()
         assert second_files == files
         assert "src/jaxsft/data/adapters.py" in files
+        assert "src/jaxsft/models/olmo2.py" in files
         assert "src/jaxsft/models/qwen3_5.py" in files
         assert "uv.lock" in files
         assert not any(path.startswith((".jaxsft/", "artifacts/")) for path in files)
@@ -71,3 +72,41 @@ def test_launch_dry_run_carries_capsule_identity(tmp_path, monkeypatch, capsys):
     assert cluster.run_remote(profile, arguments) == 0
     output = capsys.readouterr().out
     assert f"JAXSFT_SOURCE_SHA256={'a' * 64}" in output
+    assert "bootstrap uv:" in output
+    assert "/dev/shm/jaxsft-cache/bin/uv-" in output
+    assert "TPU_LOG_DIR=/dev/shm/jaxsft-runs/fixture-run/tpu-logs" in output
+
+
+def test_synthetic_cluster_launch_forwards_shape_flags(tmp_path, monkeypatch, capsys):
+    profile = cluster.load_profile(PROFILE)
+    monkeypatch.setattr(cluster, "STATE_ROOT", tmp_path)
+    state = cluster.RunState(
+        run_id="synthetic-fixture",
+        source_sha256="b" * 64,
+        remote_run_dir="/dev/shm/jaxsft-runs/synthetic-fixture",
+        hosts=profile.hosts,
+    )
+    cluster.save_state(profile, state)
+    arguments = Namespace(
+        run_id="synthetic-fixture",
+        recipe=str(
+            Path(__file__).parents[2] / "configs" / "recipes" / "olmo2_1b_ultrachat_loss_aware_smoke.yaml"
+        ),
+        dry_run=True,
+        synthetic=True,
+        synthetic_length=24,
+        synthetic_vocab_size=96,
+    )
+    assert cluster.run_remote(profile, arguments) == 0
+    output = capsys.readouterr().out
+    assert "--synthetic --synthetic-length 24 --synthetic-vocab-size 96" in output
+
+
+def test_uv_bootstrap_uses_probe_before_uploading_controller_bytes():
+    remote = cluster.PurePosixPath("/dev/shm/jaxsft-cache/bin/uv-deadbeef")
+    probe = cluster._remote_uv_probe_command(remote, "a" * 64)
+    upload = cluster._remote_uv_upload_command("worker-0.example.internal", remote, "a" * 64)
+    assert "exit 42" in probe
+    assert "cat >" not in probe
+    assert "cat >" in upload
+    assert "uv-deadbeef.tmp-worker-0.example.internal" in upload

@@ -3,8 +3,8 @@ from dataclasses import dataclass
 import pytest
 
 from jaxsft.data.adapters import AdapterContext, AdapterError, messages_adapter, ultrachat_200k_adapter
-from jaxsft.data.render import RenderedDocument, RenderedSpan, render_qwen3_5
-from jaxsft.data.tokenize import LossPolicy, tokenize_document
+from jaxsft.data.render import RenderedDocument, RenderedSpan, render_olmo2_instruct, render_qwen3_5
+from jaxsft.data.tokenize import LossPolicy, TokenizerSnapshot, tokenize_document
 
 
 CONTEXT = AdapterContext("HuggingFaceH4/ultrachat_200k", "a" * 40, "default", "train_sft", 0)
@@ -25,6 +25,63 @@ def test_ultrachat_adapter_and_qwen_render_are_semantic():
     assistant = [span for span in rendered.spans if span.role == "assistant" and span.default_weight]
     assert {span.span_class for span in assistant} == {"content", "assistant_end"}
     assert assistant[0].semantic_ref.message_index == 1
+
+
+def test_olmo2_renderer_preserves_content_and_rejects_unsupported_semantics():
+    row = {
+        "id": "olmo-fixture",
+        "messages": [
+            {"role": "system", "content": "  Keep whitespace.  "},
+            {"role": "user", "content": "Question"},
+            {"role": "assistant", "content": "Answer"},
+        ],
+    }
+    sample = messages_adapter(row, CONTEXT)
+    rendered = render_olmo2_instruct(sample)
+    assert rendered.text == (
+        "<|endoftext|><|system|>\n  Keep whitespace.  \n"
+        "<|user|>\nQuestion\n<|assistant|>\nAnswer<|endoftext|>"
+    )
+    selected = [span for span in rendered.spans if span.default_weight]
+    assert [span.span_class for span in selected] == ["content", "assistant_end"]
+
+    tool_row = {
+        "id": "tool-row",
+        "messages": [
+            {"role": "user", "content": "call it"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "f", "arguments": {}}}
+                ],
+            },
+        ],
+    }
+    with pytest.raises(ValueError, match="cannot render part kinds"):
+        render_olmo2_instruct(messages_adapter(tool_row, CONTEXT))
+
+
+def test_tokenizer_snapshot_uses_pinned_pad_configuration_in_its_identity(tmp_path):
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+
+    tokenizer = Tokenizer(
+        WordLevel(
+            {"<unk>": 0, "<|endoftext|>": 1, "<|pad|>": 2, "hello": 3},
+            unk_token="<unk>",
+        )
+    )
+    tokenizer.save(str(tmp_path / "tokenizer.json"))
+    config = tmp_path / "tokenizer_config.json"
+    config.write_text('{"pad_token":"<|pad|>"}\n')
+    olmo_snapshot, _ = TokenizerSnapshot.load(tmp_path)
+    assert olmo_snapshot.pad_token_id == 2
+
+    config.write_text('{"pad_token":{"content":"<|endoftext|>"}}\n')
+    qwen_snapshot, _ = TokenizerSnapshot.load(tmp_path)
+    assert qwen_snapshot.pad_token_id == 1
+    assert qwen_snapshot.identity_hash != olmo_snapshot.identity_hash
 
 
 def test_ultrachat_prompt_mismatch_is_rejected():

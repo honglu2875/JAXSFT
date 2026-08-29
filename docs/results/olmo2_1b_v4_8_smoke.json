@@ -1,0 +1,140 @@
+{
+  "schema_version": 1,
+  "model": {
+    "architecture": "olmo2",
+    "repo_id": "allenai/OLMo-2-0425-1B",
+    "revision": "a1847dff35000b4271fa70afc5db10fd29fedbdf",
+    "parameter_count": 1484916736,
+    "checkpoint_tensor_count": 179,
+    "training_dtype": "bfloat16"
+  },
+  "template": {
+    "renderer": "olmo2_instruct",
+    "renderer_version": 1,
+    "repo_id": "allenai/OLMo-2-0425-1B-Instruct",
+    "revision": "48d788eca847d4d7548f375ad03d3c9312f6139e",
+    "base_and_instruct_tokenizer_json_sha256": "73fd5254624f39a88e3faac6a8e11300fc3c735ed37880d4f4f08db898eaecca"
+  },
+  "data": {
+    "repo_id": "HuggingFaceH4/ultrachat_200k",
+    "revision": "8049631c405ae6576f93f445c6b8166f76f5505a",
+    "config": "default",
+    "split": "train_sft",
+    "adapter": "ultrachat_200k"
+  },
+  "recipe": {
+    "path": "configs/recipes/olmo2_1b_ultrachat_loss_aware_smoke.yaml",
+    "identity_sha256": "03c750439dc8b43b86addaa4a48b3ada00cd798dca889060309524352aed812f",
+    "max_length": 256,
+    "truncation": "loss_aware",
+    "truncation_min_context_tokens": 32,
+    "steps": 3,
+    "per_device_batch_size": 1
+  },
+  "source": {
+    "kind": "source_capsule",
+    "sha256": "fb402505dabcf84dc3f1d68e1da6e834e2371b3c88926563202f8e787646fe93"
+  },
+  "topology": {
+    "backend": "tpu",
+    "accelerator_type": "v4-8",
+    "process_count": 1,
+    "local_device_count": 4,
+    "global_device_count": 4
+  },
+  "public_checkpoint_parity": {
+    "prompt": "The capital of France is",
+    "input_ids": [791, 6864, 315, 9822, 374],
+    "compared_logits": 100352,
+    "jax_dtype": "float32",
+    "torch_dtype": "float32",
+    "jax_version": "0.11.0",
+    "transformers_version": "5.16.1",
+    "torch_version": "2.13.0+cpu",
+    "max_absolute_error": 0.0007781982421875,
+    "mean_absolute_error": 0.00023633099044673145,
+    "rmse": 0.0002566694747656584,
+    "allclose_rtol": 0.0002,
+    "allclose_atol": 0.0002,
+    "allclose": true,
+    "top_5_token_ids_match": true,
+    "top_5_token_ids": [12366, 2663, 279, 3967, 264]
+  },
+  "bfloat16_forward": {
+    "finite": true,
+    "last_logits_float32_sha256": "ce3e762037a22fe2679dc98115e07641fb00fadd3886966b1258973aa2aadecd"
+  },
+  "training_steps": [
+    {
+      "step": 1,
+      "loss": 1.401798129081726,
+      "loss_numerator": 1166.2960205078125,
+      "loss_denominator": 832.0,
+      "selected_accuracy": 0.6418269276618958,
+      "gradient_norm": 5.4382548332214355,
+      "input_tokens": 1024.0,
+      "seconds": 60.10704191215336,
+      "tokens_per_second": 17.036273411966928
+    },
+    {
+      "step": 2,
+      "loss": 1.1318838596343994,
+      "loss_numerator": 1014.1679077148438,
+      "loss_denominator": 896.0,
+      "selected_accuracy": 0.7176339626312256,
+      "gradient_norm": 5.11631441116333,
+      "input_tokens": 1024.0,
+      "seconds": 3.069873728789389,
+      "tokens_per_second": 333.5642083245608
+    },
+    {
+      "step": 3,
+      "loss": 1.577818512916565,
+      "loss_numerator": 1461.0599365234375,
+      "loss_denominator": 926.0,
+      "selected_accuracy": 0.5842332243919373,
+      "gradient_norm": 5.004202365875244,
+      "input_tokens": 1024.0,
+      "seconds": 0.11663351394236088,
+      "tokens_per_second": 8779.637733508145
+    }
+  ],
+  "stream_counters": {
+    "rows_seen": 13,
+    "rows_emitted": 12,
+    "adapter_errors": 1,
+    "length_rejections": 0,
+    "zero_objective": 0,
+    "truncated_samples": 12,
+    "tokens_truncated": 9917,
+    "selected_tokens_truncated": 7791,
+    "selected_weight_truncated": 7791.0,
+    "context_constraint_relaxations": 1
+  },
+  "tiny_checkpoint_resume": {
+    "interrupted_after_step": 2,
+    "completed_step": 3,
+    "resumed_and_uninterrupted_step_3_metrics_match": true,
+    "resumed_and_uninterrupted_checkpoint_bytes_match": true,
+    "step_3_checkpoint_sha256": "34b3a03196127d04b785dfce1c8952cb2b5a0df57bf44f7e157406b20f9b1de5"
+  },
+  "controller_synthetic_smoke": {
+    "initial_upload_source_capsule_sha256": "e9c4254d71d2dee00ca8766cc65b285fef0e4aaeaf848ea66fc91a907aa0b45b",
+    "cached_probe_source_capsule_sha256": "d651a61e38854f0af3f20ecddb4ea60979a945238f9154b33cfdf25aab745925",
+    "controller_uv_sha256": "729d27dbea534ee540a2d3ef43a62fa1a10af7fcbb6d57a70d5859509f624578",
+    "worker_had_system_uv": false,
+    "initial_content_addressed_upload": "passed",
+    "subsequent_hash_probe_without_upload": "passed",
+    "synthetic_length": 24,
+    "devices": 4,
+    "steps": 3,
+    "status": "complete",
+    "run_specific_artifact_collection": "passed"
+  },
+  "notes": [
+    "Step timings include compilation, cache, and asynchronous-runtime effects and are smoke evidence, not a benchmark.",
+    "Parameters and FP32 Adam moments were replicated on each of four local devices; model-axis sharding was not used.",
+    "The single context-budget relaxation is explicit in the stream counters; the sample still retained objective tokens.",
+    "No full 1.5B optimizer checkpoint was written during this smoke. The checkpoint round trip used the tiny OLMo2 configuration."
+  ]
+}

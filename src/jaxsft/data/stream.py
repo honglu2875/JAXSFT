@@ -10,7 +10,7 @@ import numpy as np
 
 from ..config import DataSpec
 from .adapters import AdapterContext, AdapterError, get_adapter
-from .render import render_qwen3_5
+from .render import get_renderer
 from .tokenize import LossPolicy, TokenizerSnapshot, padded_arrays, tokenize_document
 
 
@@ -49,6 +49,7 @@ class InstructionBatchStream:
         max_length: int,
         truncation: str,
         truncation_min_context_tokens: int = 0,
+        renderer: str = "qwen3_5",
     ):
         self.spec = spec
         self.snapshot = tokenizer_snapshot
@@ -63,6 +64,7 @@ class InstructionBatchStream:
         self.truncation = truncation
         self.truncation_min_context_tokens = truncation_min_context_tokens
         self.adapter = get_adapter(spec.adapter)
+        self.render = get_renderer(renderer)
         self.counters = StreamCounters()
         self._iterator = self._make_iterator(epoch=0)
 
@@ -210,7 +212,7 @@ class InstructionBatchStream:
             )
             try:
                 sample = self.adapter(row, context)
-                document = render_qwen3_5(sample)
+                document = self.render(sample)
                 tokenized = tokenize_document(
                     document,
                     self.encoder,

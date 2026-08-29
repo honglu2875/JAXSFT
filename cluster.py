@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -282,7 +283,7 @@ def make_capsule() -> tuple[Path, str, list[str]]:
 
 def default_run_id(source_sha256: str) -> str:
     timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
-    return f"{timestamp}-qwen35-smoke-{source_sha256[:8]}"
+    return f"{timestamp}-jaxsft-run-{source_sha256[:8]}"
 
 
 def validate_run_id(run_id: str) -> str:
@@ -364,6 +365,43 @@ def _recipe_relative(path: str | Path) -> str:
     return resolved.relative_to(ROOT).as_posix()
 
 
+def _local_uv_binary() -> tuple[Path, str, bytes]:
+    executable = shutil.which("uv")
+    if executable is None:
+        raise ClusterError("controller has no `uv` executable to bootstrap on workers")
+    path = Path(executable).resolve()
+    if not path.is_file():
+        raise ClusterError(f"controller uv path is not a regular file: {path}")
+    payload = path.read_bytes()
+    return path, hashlib.sha256(payload).hexdigest(), payload
+
+
+def _remote_uv_probe_command(remote_uv: PurePosixPath, digest: str) -> str:
+    return (
+        f"if test -x {shlex.quote(str(remote_uv))} && "
+        f"test \"$(sha256sum {shlex.quote(str(remote_uv))} | cut -d' ' -f1)\" = {shlex.quote(digest)}; "
+        f"then {shlex.quote(str(remote_uv))} --version; else exit 42; fi"
+    )
+
+
+def _remote_uv_upload_command(host: str, remote_uv: PurePosixPath, digest: str) -> str:
+    safe_host = re.sub(r"[^A-Za-z0-9_.-]", "_", host)
+    temporary = remote_uv.with_name(remote_uv.name + f".tmp-{safe_host}")
+    parent = remote_uv.parent
+    return (
+        f"set -eu; umask 077; mkdir -p {shlex.quote(str(parent))}; "
+        f"test ! -e {shlex.quote(str(temporary))}; "
+        f"cat > {shlex.quote(str(temporary))}; "
+        f"test \"$(sha256sum {shlex.quote(str(temporary))} | cut -d' ' -f1)\" = {shlex.quote(digest)}; "
+        f"chmod 700 {shlex.quote(str(temporary))}; "
+        f"if test -e {shlex.quote(str(remote_uv))}; then "
+        f"test \"$(sha256sum {shlex.quote(str(remote_uv))} | cut -d' ' -f1)\" = {shlex.quote(digest)}; "
+        f"unlink {shlex.quote(str(temporary))}; "
+        f"else mv {shlex.quote(str(temporary))} {shlex.quote(str(remote_uv))}; fi; "
+        f"{shlex.quote(str(remote_uv))} --version"
+    )
+
+
 def run_remote(profile: ClusterProfile, args: argparse.Namespace) -> int:
     state = load_state(profile, args.run_id)
     recipe = _recipe_relative(args.recipe)
@@ -371,10 +409,14 @@ def run_remote(profile: ClusterProfile, args: argparse.Namespace) -> int:
     source = remote_run / "source"
     venv = remote_run / "venv"
     artifacts = remote_run / "artifacts"
+    temporary_root = remote_run / "tmp"
+    tpu_log_root = remote_run / "tpu-logs"
     # Hub, dataset, uv, and compilation caches are intrinsically content keyed;
     # sharing the dedicated cache root avoids downloading the same pinned inputs
     # for every immutable run directory.
     cache = profile.remote_cache_root
+    local_uv, uv_digest, uv_payload = _local_uv_binary()
+    remote_uv = cache / "bin" / f"uv-{uv_digest[:16]}"
     env = {
         "HF_HOME": str(cache / "huggingface"),
         "HF_DATASETS_CACHE": str(cache / "datasets"),
@@ -384,8 +426,9 @@ def run_remote(profile: ClusterProfile, args: argparse.Namespace) -> int:
     }
     env_text = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
     prepare = (
-        f"set -eu; mkdir -p {shlex.quote(str(cache))} {shlex.quote(str(artifacts))}; "
-        f"cd {shlex.quote(str(source))}; env {env_text} uv sync --frozen --no-dev"
+        f"set -eu; mkdir -p {shlex.quote(str(cache))} {shlex.quote(str(artifacts))} "
+        f"{shlex.quote(str(temporary_root))} {shlex.quote(str(tpu_log_root))}; "
+        f"cd {shlex.quote(str(source))}; env {env_text} {shlex.quote(str(remote_uv))} sync --frozen --no-dev"
     )
     coordinator = f"{profile.coordinator_host}:{profile.coordinator_port}"
 
@@ -401,25 +444,54 @@ def run_remote(profile: ClusterProfile, args: argparse.Namespace) -> int:
             "JAXSFT_OUTPUT_DIR": str(artifacts),
             "JAX_PLATFORMS": "tpu",
             "PYTHONUNBUFFERED": "1",
+            "TEST_TMPDIR": str(temporary_root),
+            "TPU_LOG_DIR": str(tpu_log_root),
         }
         run_env_text = " ".join(f"{key}={shlex.quote(value)}" for key, value in run_env.items())
         python = venv / "bin" / "python"
         train = source / "train_sft.py"
         config = source / recipe
+        extra_arguments: list[str] = []
+        if getattr(args, "synthetic", False):
+            extra_arguments.extend(
+                (
+                    "--synthetic",
+                    "--synthetic-length",
+                    str(args.synthetic_length),
+                    "--synthetic-vocab-size",
+                    str(args.synthetic_vocab_size),
+                )
+            )
+        extra_text = "" if not extra_arguments else " " + shlex.join(extra_arguments)
         return (
             f"set -eu; test ! -e {shlex.quote(str(pid_file))}; "
             f"cd {shlex.quote(str(source))}; "
             f"nohup env {run_env_text} {shlex.quote(str(python))} {shlex.quote(str(train))} "
-            f"--config {shlex.quote(str(config))} > {shlex.quote(str(log_file))} 2>&1 < /dev/null & "
+            f"--config {shlex.quote(str(config))}{extra_text} > {shlex.quote(str(log_file))} 2>&1 < /dev/null & "
             f"pid=$!; printf '%s\\n' \"$pid\" > {shlex.quote(str(pid_file))}; "
             f"kill -0 \"$pid\""
         )
 
     if args.dry_run:
         for rank, host in enumerate(profile.hosts):
+            print(f"[{host}] bootstrap uv: {local_uv} -> {remote_uv} (sha256={uv_digest})")
             print(f"[{host}] prepare: {prepare}")
             print(f"[{host}] launch:  {launch_command(rank)}")
         return 0
+    def bootstrap_uv(host: str) -> subprocess.CompletedProcess:
+        probe = _ssh(profile, host, _remote_uv_probe_command(remote_uv, uv_digest), timeout=30)
+        if probe.returncode != 42:
+            return probe
+        return _ssh(
+            profile,
+            host,
+            _remote_uv_upload_command(host, remote_uv, uv_digest),
+            input_bytes=uv_payload,
+            timeout=180,
+        )
+
+    bootstrapped = _parallel(profile.hosts, bootstrap_uv)
+    _check_results(bootstrapped, "uv bootstrap")
     prepared = _parallel(profile.hosts, lambda host: _ssh(profile, host, prepare, timeout=1800))
     _check_results(prepared, "dependency preparation")
     launched = _parallel(
@@ -542,6 +614,9 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--dry-run", action="store_true")
         if name == "run":
             command.add_argument("--recipe", required=True)
+            command.add_argument("--synthetic", action="store_true")
+            command.add_argument("--synthetic-length", type=int, default=32)
+            command.add_argument("--synthetic-vocab-size", type=int, default=128)
         command.set_defaults(function=function)
     return result
 

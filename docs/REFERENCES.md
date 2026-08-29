@@ -147,6 +147,15 @@ at `8049631c405ae6576f93f445c6b8166f76f5505a`. The public Hub was also queried
 with the Hugging Face CLI on 2026-08-29 to avoid planning around stale or
 ambiguous names.
 
+The second executable integration pins
+[`allenai/OLMo-2-0425-1B`](https://huggingface.co/allenai/OLMo-2-0425-1B) at
+`a1847dff35000b4271fa70afc5db10fd29fedbdf`. Because that base tokenizer has no
+chat template, the formatting policy is separately and explicitly sourced from
+[`allenai/OLMo-2-0425-1B-Instruct`](https://huggingface.co/allenai/OLMo-2-0425-1B-Instruct)
+at `48d788eca847d4d7548f375ad03d3c9312f6139e`; their pinned `tokenizer.json`
+files are byte-identical. The architecture oracle is Hugging Face Transformers
+5.16.1's Apache-2.0 OLMo 2 implementation.
+
 - Official Qwen results include [Qwen3 dense](https://huggingface.co/Qwen/Qwen3-0.6B),
   [Qwen3.5](https://huggingface.co/Qwen/Qwen3.5-9B), and
   [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) families.

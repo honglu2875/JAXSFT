@@ -1,4 +1,4 @@
-"""Qwen3.5 text chat rendering with semantic span ownership."""
+"""Model-specific text chat rendering with semantic span ownership."""
 
 from __future__ import annotations
 
@@ -10,6 +10,9 @@ from typing import Literal
 from .ir import FrozenMap, Part, Sample, SemanticRef, ToolDefinition, thaw_json
 
 BoundaryOwner = Literal["left", "right", "reject"]
+
+QWEN35_TEMPLATE_REPO = "Qwen/Qwen3.5-0.8B-Base"
+QWEN35_TEMPLATE_REVISION = "dc7cdfe2ee4154fa7e30f5b51ca41bfa40174e68"
 
 
 @dataclass(frozen=True)
@@ -375,3 +378,112 @@ def render_qwen3_5(sample: Sample, *, add_generation_prompt: bool = False, enabl
         renderer_version=1,
         options=FrozenMap((("add_generation_prompt", add_generation_prompt), ("enable_thinking", enable_thinking))),
     )
+
+
+OLMO2_INSTRUCT_TEMPLATE_REPO = "allenai/OLMo-2-0425-1B-Instruct"
+OLMO2_INSTRUCT_TEMPLATE_REVISION = "48d788eca847d4d7548f375ad03d3c9312f6139e"
+
+
+def render_olmo2_instruct(sample: Sample, *, add_generation_prompt: bool = False) -> RenderedDocument:
+    """Render the pinned OLMo 2 Instruct template while retaining span metadata.
+
+    The base and instruct repositories at the pinned revisions have identical
+    ``tokenizer.json`` files. The instruct repository supplies the chat
+    template used here. That template has no tool, reasoning, developer, or
+    media syntax, so such semantics are rejected instead of silently dropped.
+    """
+
+    if sample.tools:
+        raise ValueError("the pinned OLMo 2 Instruct template has no tool definitions")
+    supported_parts = {"text", "code"}
+    spans = [_span(sample, "<|endoftext|>", "bos")]
+    for message_index, message in enumerate(sample.messages):
+        if message.role not in {"system", "user", "assistant"}:
+            raise ValueError(f"unsupported OLMo 2 Instruct message role {message.role!r}")
+        unsupported = [part.kind for part in message.parts if part.kind not in supported_parts]
+        if unsupported:
+            raise ValueError(
+                f"the pinned OLMo 2 Instruct template cannot render part kinds {sorted(set(unsupported))}"
+            )
+        spans.append(
+            _span(
+                sample,
+                f"<|{message.role}|>\n",
+                "role_header",
+                message_index=message_index,
+                role=message.role,
+            )
+        )
+        content_weight = 1.0 if message.role == "assistant" else 0.0
+        for part_index, part in enumerate(message.parts):
+            if not isinstance(part.value, str):
+                raise TypeError(f"{part.kind} content must be a string")
+            spans.append(
+                _span(
+                    sample,
+                    part.value,
+                    "content",
+                    message_index=message_index,
+                    part_index=part_index,
+                    part=part,
+                    role=message.role,
+                    default_weight=content_weight,
+                )
+            )
+        if message.role == "assistant":
+            suffix = "<|endoftext|>" + ("\n" if message_index + 1 < len(sample.messages) else "")
+            spans.append(
+                _span(
+                    sample,
+                    suffix,
+                    "assistant_end",
+                    message_index=message_index,
+                    role="assistant",
+                    default_weight=1.0,
+                )
+            )
+        else:
+            spans.append(
+                _span(sample, "\n", "turn_end", message_index=message_index, role=message.role)
+            )
+    if add_generation_prompt:
+        spans.append(_span(sample, "<|assistant|>\n", "generation_prompt", role="assistant"))
+    return RenderedDocument(
+        sample_id=sample.id,
+        spans=tuple(span for span in spans if span.text),
+        renderer="olmo2_instruct",
+        renderer_version=1,
+        options=FrozenMap(
+            (
+                ("add_generation_prompt", add_generation_prompt),
+                ("template_repo_id", OLMO2_INSTRUCT_TEMPLATE_REPO),
+                ("template_revision", OLMO2_INSTRUCT_TEMPLATE_REVISION),
+            )
+        ),
+    )
+
+
+def get_renderer(name: str):
+    if name in {"qwen3_5", "qwen3_5_text"}:
+        return render_qwen3_5
+    if name in {"olmo2", "olmo2_instruct"}:
+        return render_olmo2_instruct
+    raise ValueError(f"unsupported renderer {name!r}")
+
+
+def renderer_identity(name: str) -> dict[str, str | int]:
+    if name in {"qwen3_5", "qwen3_5_text"}:
+        return {
+            "name": "qwen3_5_text",
+            "version": 1,
+            "template_repo_id": QWEN35_TEMPLATE_REPO,
+            "template_revision": QWEN35_TEMPLATE_REVISION,
+        }
+    if name in {"olmo2", "olmo2_instruct"}:
+        return {
+            "name": "olmo2_instruct",
+            "version": 1,
+            "template_repo_id": OLMO2_INSTRUCT_TEMPLATE_REPO,
+            "template_revision": OLMO2_INSTRUCT_TEMPLATE_REVISION,
+        }
+    raise ValueError(f"unsupported renderer {name!r}")

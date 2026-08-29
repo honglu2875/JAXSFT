@@ -198,17 +198,42 @@ class TokenizerSnapshot:
     pad_token_id: int
 
     @classmethod
-    def load(cls, path: str | Path) -> tuple["TokenizerSnapshot", Encoder]:
+    def load(cls, path: str | Path, *, pad_token_id: int | None = None) -> tuple["TokenizerSnapshot", Encoder]:
         from tokenizers import Tokenizer
 
         path = Path(path)
         tokenizer_json = path / "tokenizer.json" if path.is_dir() else path
         payload = tokenizer_json.read_bytes()
         tokenizer = Tokenizer.from_file(str(tokenizer_json))
-        pad_token_id = tokenizer.token_to_id("<|endoftext|>")
+        tokenizer_config = tokenizer_json.with_name("tokenizer_config.json")
+        configured_pad = None
+        config_payload = b""
+        if tokenizer_config.is_file():
+            config_payload = tokenizer_config.read_bytes()
+            raw_config = json.loads(config_payload)
+            if not isinstance(raw_config, dict):
+                raise ValueError("tokenizer_config.json must contain an object")
+            configured_pad = raw_config.get("pad_token")
+            if isinstance(configured_pad, dict):
+                configured_pad = configured_pad.get("content")
+            if configured_pad is not None and not isinstance(configured_pad, str):
+                raise ValueError("tokenizer pad_token must be a string or token object")
+        if pad_token_id is None and configured_pad is not None:
+            pad_token_id = tokenizer.token_to_id(configured_pad)
         if pad_token_id is None:
-            raise ValueError("Qwen3.5 tokenizer has no <|endoftext|> padding token")
-        return cls(tokenizer_json, hashlib.sha256(payload).hexdigest(), int(pad_token_id)), tokenizer
+            for token in ("<|pad|>", "<|endoftext|>"):
+                pad_token_id = tokenizer.token_to_id(token)
+                if pad_token_id is not None:
+                    break
+        if pad_token_id is None or not 0 <= int(pad_token_id) < tokenizer.get_vocab_size():
+            raise ValueError("tokenizer has no valid padding token")
+        digest = hashlib.sha256(b"jaxsft-tokenizer-v1\0")
+        digest.update(payload)
+        digest.update(b"\0tokenizer-config\0")
+        digest.update(config_payload)
+        digest.update(b"\0pad-token-id\0")
+        digest.update(str(int(pad_token_id)).encode())
+        return cls(tokenizer_json, digest.hexdigest(), int(pad_token_id)), tokenizer
 
 
 def _span_ranges(spans: tuple[RenderedSpan, ...]) -> tuple[tuple[int, int], ...]:

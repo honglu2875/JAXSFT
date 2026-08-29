@@ -35,6 +35,12 @@ pinned Hugging Face cache, and passed:
   continued metric trajectory against an uninterrupted reference;
 - artifact collection back to the controller.
 
+A later OLMo 2 gate on a supplied v4-8 additionally loaded and compared the
+1,484,916,736-parameter public checkpoint, completed three real UltraChat
+updates, and proved a byte-identical tiny checkpoint resume. The host had no
+system `uv`; this motivated the content-addressed controller bootstrap described
+below.
+
 The real run's first backward compile took about 101 seconds. A measured steady
 step took 0.403 seconds at 2,538 input tokens/s for length 256 and local batch
 four. This is a correctness smoke, not a benchmark: it uses replicated full
@@ -136,7 +142,10 @@ that a later edit mutates a running job.
   root; an existing target is a hard failure.
 - Stream one tar capsule to all hosts and write its SHA-256 beside the source.
 - Reuse a content-addressed, host-local dependency/model/token/data cache.
-- Install/sync the frozen environment without changing host-wide packages.
+- Upload the controller's exact `uv` executable to a SHA-addressed mode-0700
+  cache path when needed, then sync the frozen environment without changing
+  host-wide packages. An incompatible controller/worker binary fails before
+  launch rather than falling back to system package mutation.
 - Support an explicit offline mode that ships the interpreter/`uv` cache and
   required Hub artifacts; “frozen” alone is not assumed offline.
 - Never use `--delete` outside the exact run directory. Cache cleanup is a
@@ -151,6 +160,8 @@ that a later edit mutates a running job.
 - Runtime identity comes from `jax.process_index()` and `jax.process_count()`.
 - Host suffix order is used only for inventory display.
 - Each worker writes an early rank handshake and a run-specific PID file.
+- TPU logs and temporary files are directed to writable paths inside the exact
+  immutable run directory.
 - All ranks validate the same source/config hashes before compilation.
 
 ### Monitor and collect

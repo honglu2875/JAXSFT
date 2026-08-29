@@ -329,9 +329,7 @@ def load_synthetic_cursor(raw: object, *, expected_step: int, length: int, vocab
     return batches_consumed
 
 
-def make_train_step(model_config, training, optimizer_hparams):
-    from jaxsft.models.qwen3_5 import forward
-
+def make_train_step(model_config, training, optimizer_hparams, model_forward):
     def train_step(params, optimizer, accumulated_batch):
         zero_gradients = jax.tree.map(jnp.zeros_like, params)
         initial = (
@@ -346,7 +344,7 @@ def make_train_step(model_config, training, optimizer_hparams):
             numerator, denominator, correct, input_tokens, gradients = carry
 
             def objective(current_params):
-                logits = forward(
+                logits = model_forward(
                     current_params,
                     model_config,
                     microbatch["input_ids"],
@@ -456,30 +454,35 @@ def run(args: argparse.Namespace) -> int:
             f"got {start_step} < {stop_step}"
         )
 
-    from jaxsft.models.qwen3_5 import (
-        Qwen35Config,
-        init_params,
-        load_hf_checkpoint,
-        parameter_count,
-        tiny_config,
-        validate_params,
-    )
+    from jaxsft.models.registry import get_model_implementation
+
+    model = get_model_implementation(recipe.model.architecture)
 
     dtype = jnp.bfloat16 if recipe.model.dtype == "bfloat16" else jnp.float32
     stream = None
     if args.synthetic:
-        model_config = tiny_config(vocab_size=args.synthetic_vocab_size)
+        model_config = model.tiny_config(vocab_size=args.synthetic_vocab_size)
         params = (
-            init_params(jax.random.key(recipe.run.seed), model_config, dtype=jnp.float32)
+            model.init_params(jax.random.key(recipe.run.seed), model_config, dtype=jnp.float32)
             if restored is None
             else restored["params"]
         )
     elif restored is not None:
-        model_config = Qwen35Config.from_json(snapshot / "config.json")
+        model_config = model.config_type.from_json(snapshot / "config.json")
         params = restored["params"]
     else:
-        model_config, params = load_hf_checkpoint(snapshot, dtype=dtype)
-    validate_params(params, model_config)
+        model_config, params = model.load_hf_checkpoint(snapshot, dtype=dtype)
+    model.validate_params(params, model_config)
+
+    tokenizer_snapshot = None
+    encoder = None
+    if not args.synthetic:
+        from jaxsft.data.tokenize import TokenizerSnapshot
+
+        tokenizer_snapshot, encoder = TokenizerSnapshot.load(
+            snapshot,
+            pad_token_id=getattr(model_config, "pad_token_id", None),
+        )
 
     output_override = os.environ.get("JAXSFT_OUTPUT_DIR")
     output_dir = Path(output_override or recipe.run.output_dir).expanduser().resolve()
@@ -488,11 +491,13 @@ def run(args: argparse.Namespace) -> int:
         "initialized",
         rank=process_index,
         recipe=recipe.identity_hash,
-        parameter_count=parameter_count(model_config),
+        parameter_count=model.parameter_count(model_config),
         **topology,
     )
     atomic_json(output_dir / f"rank-{process_index:03d}-topology.json", topology)
     if process_index == 0:
+        from jaxsft.data.render import renderer_identity
+
         packages = {}
         for package in ("jax", "jaxlib", "numpy", "safetensors", "tokenizers", "datasets", "huggingface-hub"):
             try:
@@ -502,9 +507,23 @@ def run(args: argparse.Namespace) -> int:
         manifest = {
             "schema_version": 3,
             "recipe": recipe.public_dict(),
-            "model": {"repo_id": recipe.model.repo_id, "revision": recipe.model.revision},
-            "data": {"repo_id": recipe.data.repo_id, "revision": recipe.data.revision},
-            "parameter_count": parameter_count(model_config),
+            "model": {
+                "architecture": recipe.model.architecture,
+                "repo_id": recipe.model.repo_id,
+                "revision": recipe.model.revision,
+            },
+            "data": {
+                "repo_id": recipe.data.repo_id,
+                "revision": recipe.data.revision,
+                "renderer": renderer_identity(recipe.data.renderer or recipe.model.architecture),
+            },
+            "tokenizer": None
+            if tokenizer_snapshot is None
+            else {
+                "identity_sha256": tokenizer_snapshot.identity_hash,
+                "pad_token_id": tokenizer_snapshot.pad_token_id,
+            },
+            "parameter_count": model.parameter_count(model_config),
             "topology": topology,
             "software": {"python": sys.version, "platform": platform.platform(), "packages": packages},
             "source": source_identity,
@@ -558,9 +577,9 @@ def run(args: argparse.Namespace) -> int:
         counters = None
     else:
         from jaxsft.data.stream import InstructionBatchStream
-        from jaxsft.data.tokenize import LossPolicy, TokenizerSnapshot
+        from jaxsft.data.tokenize import LossPolicy
 
-        tokenizer_snapshot, encoder = TokenizerSnapshot.load(snapshot)
+        assert tokenizer_snapshot is not None and encoder is not None
         stream = InstructionBatchStream(
             recipe.data,
             tokenizer_snapshot=tokenizer_snapshot,
@@ -574,6 +593,7 @@ def run(args: argparse.Namespace) -> int:
             max_length=recipe.training.max_length,
             truncation=recipe.training.truncation,
             truncation_min_context_tokens=recipe.training.truncation_min_context_tokens,
+            renderer=recipe.data.renderer or recipe.model.architecture,
         )
         if restored is not None:
             stream.load_state_dict(restored["data_state"])
@@ -604,7 +624,7 @@ def run(args: argparse.Namespace) -> int:
         optimizer = restored["optimizer"]
         validate_optimizer_checkpoint(params, optimizer, expected_step=start_step)
     train_step = jax.pmap(
-        make_train_step(model_config, recipe.training, optimizer_hparams),
+        make_train_step(model_config, recipe.training, optimizer_hparams, model.forward),
         axis_name="data",
         in_axes=(None, None, 0),
         out_axes=(None, None, None),
@@ -679,7 +699,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, help="strict YAML recipe")
     parser.add_argument("--dry-run", action="store_true", help="validate and resolve the recipe without side effects")
-    parser.add_argument("--synthetic", action="store_true", help="run the tiny Qwen3.5 model without Hub access")
+    parser.add_argument("--synthetic", action="store_true", help="run the recipe architecture's tiny model offline")
     parser.add_argument("--synthetic-length", type=int, default=32)
     parser.add_argument("--synthetic-vocab-size", type=int, default=128)
     parser.add_argument("--resume", help="trusted local step checkpoint to resume")

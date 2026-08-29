@@ -10,7 +10,7 @@ from pathlib import Path
 def data_explain(args: argparse.Namespace) -> int:
     from .config import load_recipe
     from .data.adapters import AdapterContext, get_adapter
-    from .data.render import render_qwen3_5
+    from .data.render import get_renderer
     from .data.tokenize import LossPolicy, TokenizerSnapshot, explain_tokens, tokenize_document
 
     row = json.loads(Path(args.row).read_text())
@@ -24,11 +24,15 @@ def data_explain(args: argparse.Namespace) -> int:
         row_index=args.row_index,
     )
     sample = get_adapter(args.adapter)(row, context)
-    document = render_qwen3_5(sample)
+    recipe = load_recipe(args.recipe) if args.recipe else None
+    renderer_name = args.renderer
+    if recipe is not None:
+        renderer_name = recipe.data.renderer or recipe.model.architecture
+    document = get_renderer(renderer_name)(sample)
     snapshot, encoder = TokenizerSnapshot.load(args.tokenizer)
     policy = LossPolicy()
-    if args.recipe:
-        policy = LossPolicy.from_config(load_recipe(args.recipe).objective)
+    if recipe is not None:
+        policy = LossPolicy.from_config(recipe.objective)
     tokenized = tokenize_document(
         document,
         encoder,
@@ -43,16 +47,24 @@ def data_explain(args: argparse.Namespace) -> int:
 
 
 def model_inspect(args: argparse.Namespace) -> int:
-    from .models.qwen3_5 import Qwen35Config, parameter_count
+    from .models.registry import get_model_implementation
 
-    config = Qwen35Config.from_json(args.config)
+    raw = json.loads(Path(args.config).read_text())
+    model_type = raw.get("model_type")
+    text_config = raw.get("text_config")
+    if isinstance(text_config, dict):
+        model_type = text_config.get("model_type", model_type)
+    architecture = "qwen3_5" if model_type == "qwen3_5_text" else model_type
+    model = get_model_implementation(architecture)
+    config = model.config_type.from_dict(raw)
     result = {
-        "architecture": "qwen3_5",
-        "parameter_count": parameter_count(config),
-        "parameter_gib_bfloat16": parameter_count(config) * 2 / 1024**3,
-        "layers": list(config.layer_types),
+        "architecture": architecture,
+        "parameter_count": model.parameter_count(config),
+        "parameter_gib_bfloat16": model.parameter_count(config) * 2 / 1024**3,
         "config": config.__dict__,
     }
+    if hasattr(config, "layer_types"):
+        result["layers"] = list(config.layer_types)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
@@ -67,6 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     explain.add_argument("--adapter", required=True)
     explain.add_argument("--tokenizer", required=True)
     explain.add_argument("--recipe")
+    explain.add_argument("--renderer", choices=("qwen3_5", "olmo2_instruct"), default="qwen3_5")
     explain.add_argument("--repo-id", default="local")
     explain.add_argument("--revision", default="local")
     explain.add_argument("--dataset-config", default="default")

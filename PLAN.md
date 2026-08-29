@@ -12,6 +12,9 @@ The repository spine and first executable vertical slice now exist. Completed:
 - a single-file dense Qwen3.5 text model, direct safetensors map, weighted loss,
   AdamW, one-/four-device CPU smoke, deterministic single-process resume, and
   optional Hugging Face parity tests;
+- a single-file dense OLMo 2 text model, explicit model/renderer dispatch,
+  pinned plain-conversation template, full Hugging Face training-step parity,
+  and public-checkpoint all-logit parity;
 - pinned `Qwen/Qwen3.5-0.8B-Base` and UltraChat 200k smoke recipe;
 - a single-host v4-8 smoke using one JAX process and four local TPU devices.
 
@@ -30,8 +33,17 @@ smoke. All 19 truncated emitted samples retained the configured 32-token
 context budget. The original four-host slice was pre-empted, so multi-host
 startup and portable checkpointing remain open. Packing,
 complete-turn/tool-boundary truncation,
-high-performance chunkwise DeltaNet, model-axis sharding, OLMo, and Kimi remain
+high-performance chunkwise DeltaNet, model-axis sharding, and Kimi remain
 planned work rather than advertised support.
+
+The next model-breadth gate is also complete: pinned
+`allenai/OLMo-2-0425-1B` loaded all 179 tensors (1,484,916,736 parameters), and
+its complete 100,352-element final-logit vector matched float32 Transformers at
+`rtol=atol=2e-4`. The same loss-aware UltraChat recipe completed three
+full-parameter updates on a v4-8 with finite metrics. A tiny OLMo interrupted
+run cold-resumed to a byte-identical final checkpoint. OLMo's pinned template
+does not represent tools or reasoning, so those samples fail explicitly rather
+than losing metadata.
 
 ## 1. Outcome
 
@@ -233,6 +245,10 @@ Exit gate:
   truncation/packing, including adjacent tool calls and empty assistant turns.
 
 ### M5 — Model breadth
+
+Status: the first item, OLMo 2 dense, has passed tiny parity, pinned public
+checkpoint load/forward parity, shared-trainer SFT, and tiny checkpoint resume
+on a measured single-host v4-8. Remaining items stay gated.
 
 Deliverables, one gated model at a time:
 
