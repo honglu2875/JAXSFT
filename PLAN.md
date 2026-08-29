@@ -24,8 +24,12 @@ Synthetic interruption at step 2 followed by a cold resume produced a
 byte-identical step-4 checkpoint to the uninterrupted run. A full 7.52 GB
 Qwen3.5 model/AdamW checkpoint also survived a fresh-process restore; its
 replayed UltraChat steps 3–5 matched the uninterrupted reference exactly. The
-original four-host slice was pre-empted, so multi-host startup and portable
-checkpointing remain open. Packing, complete-turn/tool-boundary truncation,
+loss-aware recipe then emitted 20 samples from 22 rows with no zero-objective
+truncation drops, compared with 28 rows and six drops for the right-truncation
+smoke. All 19 truncated emitted samples retained the configured 32-token
+context budget. The original four-host slice was pre-empted, so multi-host
+startup and portable checkpointing remain open. Packing,
+complete-turn/tool-boundary truncation,
 high-performance chunkwise DeltaNet, model-axis sharding, OLMo, and Kimi remain
 planned work rather than advertised support.
 

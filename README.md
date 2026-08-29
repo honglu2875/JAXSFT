@@ -52,6 +52,12 @@ safetensors, replayed the UltraChat cursor, and matched every step-3/4/5 metric
 from a same-source uninterrupted run. See the
 [resume result](docs/results/qwen35_v4_8_resume_smoke.json).
 
+The 32-token-context loss-aware recipe was also run against the same pinned
+stream. It emitted 20 samples after 22 rows with zero zero-objective drops,
+versus 28 rows and six zero-objective drops under right truncation; all 19
+truncated emitted samples met the context constraint. See the
+[loss-aware result](docs/results/qwen35_v4_8_loss_aware_smoke.json).
+
 ## Quick start
 
 Python 3.12 and `uv` are required.

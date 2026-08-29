@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "date_utc": "2026-08-29",
+  "purpose": "loss-aware truncation and context-budget correctness smoke; not a performance benchmark",
+  "source": {
+    "git_commit": "6b1d42c",
+    "capsule_sha256": "df91fdea755e3f63490badd2285698ea696ee02c2edfaa946d33bd16b517ba74"
+  },
+  "recipe": {
+    "path": "configs/recipes/qwen35_0_8b_ultrachat_loss_aware_smoke.yaml",
+    "identity_hash": "a552679c79d91d053f095e7c2ac0f63fda3601602b74f0381946c947933fcde5",
+    "max_length": 256,
+    "truncation": "loss_aware",
+    "truncation_min_context_tokens": 32
+  },
+  "model": {
+    "repo_id": "Qwen/Qwen3.5-0.8B-Base",
+    "revision": "dc7cdfe2ee4154fa7e30f5b51ca41bfa40174e68",
+    "text_parameter_count": 752393024
+  },
+  "data": {
+    "repo_id": "HuggingFaceH4/ultrachat_200k",
+    "revision": "8049631c405ae6576f93f445c6b8166f76f5505a",
+    "config": "default",
+    "split": "train_sft"
+  },
+  "topology": {
+    "accelerator": "v4-8",
+    "process_count": 1,
+    "local_device_count": 4,
+    "global_device_count": 4,
+    "parameter_placement": "replicated"
+  },
+  "training": {
+    "steps": 5,
+    "all_losses_finite": true,
+    "all_gradient_norms_finite": true,
+    "final_step": {
+      "loss": 1.472999095916748,
+      "loss_numerator": 1319.80712890625,
+      "loss_denominator": 896.0,
+      "selected_accuracy": 0.625,
+      "gradient_norm_before_clipping": 15.771210670471191,
+      "input_tokens": 1024,
+      "seconds": 0.40248552430421114,
+      "input_tokens_per_second": 2544.190879337138
+    }
+  },
+  "stream_counters": {
+    "rows_seen": 22,
+    "rows_emitted": 20,
+    "adapter_errors": 2,
+    "adapter_error_reason": "UltraChat prompt differed from the first user message",
+    "zero_objective": 0,
+    "truncated_samples": 19,
+    "tokens_truncated": 18023,
+    "selected_tokens_truncated": 14413,
+    "selected_weight_truncated": 14413.0,
+    "context_constraint_relaxations": 0
+  },
+  "right_truncation_reference": {
+    "source_result": "docs/results/qwen35_v4_8_smoke.json",
+    "rows_seen_for_20_emitted_samples": 28,
+    "adapter_errors": 2,
+    "zero_objective": 6,
+    "comparison_scope": "data-utilization diagnostic only; training batches and code revisions differ"
+  },
+  "schema_v3_resume": {
+    "synthetic_interrupted_after_step": 2,
+    "completed_step": 4,
+    "uninterrupted_checkpoint_sha256": "1dc9301b51035eb6ff6a07d4bbf7d9e78628b408be94d2a548eec04168f76072",
+    "resumed_checkpoint_sha256": "1dc9301b51035eb6ff6a07d4bbf7d9e78628b408be94d2a548eec04168f76072",
+    "byte_identical": true
+  },
+  "capsule_validation": {
+    "ruff": "passed",
+    "unit_tests_passed": 32,
+    "unit_tests_skipped": 1,
+    "skip_reason": "Git source-capsule test is inapplicable because immutable capsules intentionally omit .git",
+    "compileall": "passed"
+  },
+  "limitations": [
+    "The token window may cut through a semantic turn or tool transaction; complete-boundary truncation remains future work.",
+    "This validates one JAX process with four local TPU devices, not multi-host portability.",
+    "Private host inventory and credentials are intentionally omitted."
+  ]
+}
