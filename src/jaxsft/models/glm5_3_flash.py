@@ -170,6 +170,304 @@ class SafetensorsIndex:
             raise ValueError("checkpoint index does not match its pinned contract: " + "; ".join(mismatches))
 
 
+_SAFETENSORS_DTYPE_WIDTHS = {"F8_E4M3": 1, "BF16": 2, "F32": 4}
+
+
+@dataclass(frozen=True)
+class SafetensorsTensorRange:
+    """One validated tensor payload range within a safetensors shard."""
+
+    name: str
+    dtype: str
+    shape: tuple[int, ...]
+    relative_start: int
+    relative_end: int
+    data_section_start: int
+
+    @property
+    def nbytes(self) -> int:
+        return self.relative_end - self.relative_start
+
+    @property
+    def absolute_start(self) -> int:
+        return self.data_section_start + self.relative_start
+
+    @property
+    def absolute_end(self) -> int:
+        return self.data_section_start + self.relative_end
+
+    @property
+    def http_range(self) -> tuple[int, int]:
+        """Return the inclusive byte range required by an HTTP Range request."""
+
+        return self.absolute_start, self.absolute_end - 1
+
+
+@dataclass(frozen=True)
+class SafetensorsShardHeader:
+    """Strict safetensors header used to plan bounded payload range reads."""
+
+    header_length: int
+    tensors: tuple[SafetensorsTensorRange, ...]
+
+    @property
+    def data_section_start(self) -> int:
+        return 8 + self.header_length
+
+    @classmethod
+    def from_prefix(cls, prefix: bytes) -> "SafetensorsShardHeader":
+        """Parse an eight-byte length plus the complete JSON header.
+
+        A remote loader first reads bytes 0--7, then exactly the advertised
+        header.  Payload bytes are deliberately not accepted or needed here.
+        """
+
+        if len(prefix) < 8:
+            raise ValueError("safetensors prefix must contain its eight-byte header length")
+        header_length = int.from_bytes(prefix[:8], "little", signed=False)
+        if header_length <= 0 or header_length > 100 * 1024 * 1024:
+            raise ValueError(f"unsafe safetensors header length: {header_length}")
+        if len(prefix) < 8 + header_length:
+            raise ValueError(
+                f"incomplete safetensors header: have {len(prefix) - 8} bytes, need {header_length}"
+            )
+        return cls.from_json_bytes(prefix[8 : 8 + header_length], header_length=header_length)
+
+    @classmethod
+    def from_json_bytes(
+        cls,
+        payload: bytes,
+        *,
+        header_length: int | None = None,
+    ) -> "SafetensorsShardHeader":
+        """Parse header JSON already separated from its length prefix."""
+
+        if header_length is None:
+            header_length = len(payload)
+        if header_length != len(payload):
+            raise ValueError("safetensors header length does not match the JSON payload")
+        raw = json.loads(payload, object_pairs_hook=_unique_json_object)
+        if not isinstance(raw, dict) or not raw:
+            raise ValueError("safetensors header must be a non-empty JSON object")
+        metadata = raw.pop("__metadata__", None)
+        if metadata is not None and (
+            not isinstance(metadata, dict)
+            or any(not isinstance(key, str) or not isinstance(value, str) for key, value in metadata.items())
+        ):
+            raise ValueError("safetensors __metadata__ must map strings to strings")
+
+        data_section_start = 8 + header_length
+        tensors: list[SafetensorsTensorRange] = []
+        for name, record in raw.items():
+            if not isinstance(name, str) or not name:
+                raise ValueError("safetensors tensor names must be non-empty strings")
+            if not isinstance(record, dict) or set(record) != {"dtype", "shape", "data_offsets"}:
+                raise ValueError(f"malformed safetensors record for {name!r}")
+            dtype = record["dtype"]
+            if dtype not in _SAFETENSORS_DTYPE_WIDTHS:
+                raise ValueError(f"unsupported GLM-5.3 safetensors dtype {dtype!r} for {name!r}")
+            shape_value = record["shape"]
+            if not isinstance(shape_value, list) or any(
+                isinstance(size, bool) or not isinstance(size, int) or size <= 0 for size in shape_value
+            ):
+                raise ValueError(f"invalid safetensors shape for {name!r}: {shape_value!r}")
+            offsets = record["data_offsets"]
+            if (
+                not isinstance(offsets, list)
+                or len(offsets) != 2
+                or any(isinstance(offset, bool) or not isinstance(offset, int) for offset in offsets)
+            ):
+                raise ValueError(f"invalid safetensors data_offsets for {name!r}: {offsets!r}")
+            start, end = offsets
+            if start < 0 or end <= start:
+                raise ValueError(f"invalid safetensors byte interval for {name!r}: {offsets!r}")
+            shape = tuple(shape_value)
+            expected_bytes = math.prod(shape) * _SAFETENSORS_DTYPE_WIDTHS[dtype]
+            if end - start != expected_bytes:
+                raise ValueError(
+                    f"safetensors byte count mismatch for {name!r}: {end - start}, expected {expected_bytes}"
+                )
+            tensors.append(
+                SafetensorsTensorRange(
+                    name=name,
+                    dtype=dtype,
+                    shape=shape,
+                    relative_start=start,
+                    relative_end=end,
+                    data_section_start=data_section_start,
+                )
+            )
+
+        tensors.sort(key=lambda tensor: (tensor.relative_start, tensor.name))
+        for previous, current in zip(tensors, tensors[1:], strict=False):
+            if current.relative_start < previous.relative_end:
+                raise ValueError(
+                    f"overlapping safetensors tensors {previous.name!r} and {current.name!r}"
+                )
+        return cls(header_length=header_length, tensors=tuple(tensors))
+
+    def tensor(self, name: str) -> SafetensorsTensorRange:
+        matches = [tensor for tensor in self.tensors if tensor.name == name]
+        if len(matches) != 1:
+            raise KeyError(f"expected exactly one safetensors tensor named {name!r}, found {len(matches)}")
+        return matches[0]
+
+
+def _validate_block_fp8_shapes(
+    weight_bits: Any,
+    weight_scale_inv: Any,
+    block_shape: tuple[int, int],
+) -> tuple[int, int, int, int]:
+    if len(block_shape) != 2 or any(
+        isinstance(size, bool) or not isinstance(size, int) or size <= 0 for size in block_shape
+    ):
+        raise ValueError("block_shape must contain two positive integers")
+    if weight_bits.ndim != 2:
+        raise ValueError("block-FP8 weight must have shape [output, input]")
+    if weight_scale_inv.ndim != 2:
+        raise ValueError("block-FP8 scale grid must have shape [output_block, input_block]")
+    rows, columns = weight_bits.shape
+    block_rows, block_columns = block_shape
+    if rows % block_rows or columns % block_columns:
+        raise ValueError(
+            f"weight shape {(rows, columns)} must be divisible by block shape {block_shape}"
+        )
+    expected_scale_shape = (rows // block_rows, columns // block_columns)
+    if weight_scale_inv.shape != expected_scale_shape:
+        raise ValueError(
+            f"scale grid has shape {weight_scale_inv.shape}, expected {expected_scale_shape}"
+        )
+    return rows, columns, block_rows, block_columns
+
+
+def fp8_e4m3fn_from_bits(weight_bits: Any) -> jax.Array:
+    """Bitcast safetensors ``F8_E4M3`` payload bytes to JAX E4M3FN."""
+
+    weight_bits = jnp.asarray(weight_bits)
+    if weight_bits.dtype != jnp.uint8:
+        raise TypeError(f"raw FP8 payload must be uint8, got {weight_bits.dtype}")
+    return jax.lax.bitcast_convert_type(weight_bits, jnp.float8_e4m3fn)
+
+
+def dequantize_block_fp8(
+    weight_bits: Any,
+    weight_scale_inv: Any,
+    *,
+    block_shape: tuple[int, int] = (128, 128),
+    dtype: Any = jnp.float32,
+) -> jax.Array:
+    """Reference dequantization matching Transformers' scale-grid orientation.
+
+    This materializes the full dense weight and therefore exists only as an
+    oracle for bounded tests.  Full-model execution must use
+    :func:`block_fp8_linear` instead.
+    """
+
+    weight_bits = jnp.asarray(weight_bits)
+    weight_scale_inv = jnp.asarray(weight_scale_inv)
+    rows, columns, block_rows, block_columns = _validate_block_fp8_shapes(
+        weight_bits, weight_scale_inv, block_shape
+    )
+    if weight_bits.dtype == jnp.uint8:
+        quantized = fp8_e4m3fn_from_bits(weight_bits)
+    elif weight_bits.dtype == jnp.float8_e4m3fn:
+        quantized = weight_bits
+    else:
+        raise TypeError(f"block-FP8 weight must be uint8 bits or float8_e4m3fn, got {weight_bits.dtype}")
+    dtype = jnp.dtype(dtype)
+    if dtype not in (jnp.bfloat16, jnp.float32):
+        raise ValueError("block-FP8 reference dtype must be bfloat16 or float32")
+    quantized = quantized.astype(dtype).reshape(
+        rows // block_rows,
+        block_rows,
+        columns // block_columns,
+        block_columns,
+    )
+    scales = weight_scale_inv.astype(dtype)[:, None, :, None]
+    return (quantized * scales).reshape(rows, columns)
+
+
+def block_fp8_linear(
+    inputs: Any,
+    weight_bits: Any,
+    weight_scale_inv: Any,
+    *,
+    block_shape: tuple[int, int] = (128, 128),
+    compute_dtype: Any = jnp.bfloat16,
+    output_dtype: Any | None = None,
+) -> jax.Array:
+    """Contract with a frozen block-FP8 ``[output,input]`` weight tile by tile.
+
+    Only one weight tile is converted at a time in the JAX program.  The TPU
+    compiler memory report remains the authority on whether lowering preserves
+    that property; this source-level loop alone is not treated as evidence.
+    Accumulation is float32 and every dot requests the highest JAX precision.
+    """
+
+    inputs = jnp.asarray(inputs)
+    weight_bits = jnp.asarray(weight_bits)
+    weight_scale_inv = jnp.asarray(weight_scale_inv)
+    rows, columns, block_rows, block_columns = _validate_block_fp8_shapes(
+        weight_bits, weight_scale_inv, block_shape
+    )
+    if inputs.ndim < 1 or inputs.shape[-1] != columns:
+        raise ValueError(f"inputs must end in dimension {columns}, got {inputs.shape}")
+    if not jnp.issubdtype(inputs.dtype, jnp.floating):
+        raise TypeError(f"block-FP8 inputs must be floating point, got {inputs.dtype}")
+    if weight_bits.dtype not in (jnp.uint8, jnp.float8_e4m3fn):
+        raise TypeError(f"block-FP8 weight must be uint8 bits or float8_e4m3fn, got {weight_bits.dtype}")
+    if not jnp.issubdtype(weight_scale_inv.dtype, jnp.floating):
+        raise TypeError(f"block-FP8 scales must be floating point, got {weight_scale_inv.dtype}")
+
+    compute_dtype = jnp.dtype(compute_dtype)
+    if compute_dtype not in (jnp.bfloat16, jnp.float32):
+        raise ValueError("compute_dtype must be bfloat16 or float32")
+    if output_dtype is None:
+        output_dtype = inputs.dtype
+    output_dtype = jnp.dtype(output_dtype)
+    if not jnp.issubdtype(output_dtype, jnp.floating):
+        raise TypeError(f"block-FP8 output dtype must be floating point, got {output_dtype}")
+
+    leading_shape = inputs.shape[:-1]
+    flat_inputs = inputs.reshape((-1, columns)).astype(compute_dtype)
+    flat_output = jnp.zeros((flat_inputs.shape[0], rows), dtype=jnp.float32)
+    row_blocks = rows // block_rows
+    column_blocks = columns // block_columns
+
+    def row_body(row_block: jax.Array, output: jax.Array) -> jax.Array:
+        accumulator = jnp.zeros((flat_inputs.shape[0], block_rows), dtype=jnp.float32)
+
+        def column_body(column_block: jax.Array, partial: jax.Array) -> jax.Array:
+            input_tile = jax.lax.dynamic_slice(
+                flat_inputs,
+                (0, column_block * block_columns),
+                (flat_inputs.shape[0], block_columns),
+            )
+            weight_tile = jax.lax.dynamic_slice(
+                weight_bits,
+                (row_block * block_rows, column_block * block_columns),
+                (block_rows, block_columns),
+            )
+            if weight_bits.dtype == jnp.uint8:
+                weight_tile = fp8_e4m3fn_from_bits(weight_tile)
+            scale = weight_scale_inv[row_block, column_block].astype(compute_dtype)
+            dequantized_tile = weight_tile.astype(compute_dtype) * scale
+            product = jax.lax.dot_general(
+                input_tile,
+                dequantized_tile,
+                dimension_numbers=(((1,), (1,)), ((), ())),
+                precision=_PRECISION,
+                preferred_element_type=jnp.float32,
+            )
+            return partial + product
+
+        accumulator = jax.lax.fori_loop(0, column_blocks, column_body, accumulator)
+        return jax.lax.dynamic_update_slice(output, accumulator, (0, row_block * block_rows))
+
+    flat_output = jax.lax.fori_loop(0, row_blocks, row_body, flat_output)
+    return flat_output.reshape((*leading_shape, rows)).astype(output_dtype)
+
+
 @dataclass(frozen=True)
 class LinearAttentionConfig:
     num_heads: int
@@ -1680,12 +1978,17 @@ __all__ = [
     "LinearAttentionConfig",
     "MemoryLine",
     "SafetensorsIndex",
+    "SafetensorsShardHeader",
+    "SafetensorsTensorRange",
     "V432LoRAPreflight",
     "_PRECISION",
     "attention_lora_parameter_count",
     "attention_lora_target_paths",
+    "block_fp8_linear",
     "convert_hf_state_dict",
+    "dequantize_block_fp8",
     "forward",
+    "fp8_e4m3fn_from_bits",
     "init_params",
     "parameter_count",
     "recurrent_kimi_delta_attention",

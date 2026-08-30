@@ -13,8 +13,11 @@ from jaxsft.models.glm5_3_flash import (
     CheckpointContract,
     Glm53TextConfig,
     SafetensorsIndex,
+    SafetensorsShardHeader,
     attention_lora_parameter_count,
     attention_lora_target_paths,
+    block_fp8_linear,
+    dequantize_block_fp8,
     forward,
     init_params,
     parameter_count,
@@ -175,6 +178,86 @@ def test_safetensors_index_is_strict_and_verifies_contract(tmp_path):
     path.write_text('{"metadata":{"total_size":1},"weight_map":{"x":"../escape.safetensors"}}')
     with pytest.raises(ValueError, match="basename"):
         SafetensorsIndex.from_path(path)
+
+
+def test_safetensors_shard_header_plans_exact_http_ranges():
+    header_json = json.dumps(
+        {
+            "weight": {"dtype": "F8_E4M3", "shape": [4, 6], "data_offsets": [0, 24]},
+            "weight_scale_inv": {"dtype": "F32", "shape": [2, 2], "data_offsets": [24, 40]},
+        },
+        separators=(",", ":"),
+    ).encode()
+    prefix = len(header_json).to_bytes(8, "little") + header_json
+    header = SafetensorsShardHeader.from_prefix(prefix)
+    weight = header.tensor("weight")
+    scale = header.tensor("weight_scale_inv")
+    assert weight.shape == (4, 6)
+    assert weight.nbytes == 24
+    assert weight.absolute_start == 8 + len(header_json)
+    assert weight.http_range == (8 + len(header_json), 8 + len(header_json) + 23)
+    assert scale.http_range[0] == weight.http_range[1] + 1
+
+    malformed = json.dumps(
+        {"weight": {"dtype": "F8_E4M3", "shape": [4, 6], "data_offsets": [0, 23]}}
+    ).encode()
+    with pytest.raises(ValueError, match="byte count mismatch"):
+        SafetensorsShardHeader.from_prefix(len(malformed).to_bytes(8, "little") + malformed)
+    with pytest.raises(ValueError, match="incomplete"):
+        SafetensorsShardHeader.from_prefix(prefix[:-1])
+
+
+def test_block_fp8_dequant_and_tiled_linear_match_dense_reference():
+    block_shape = (2, 3)
+    quantized = jnp.asarray(
+        [
+            [1.0, -2.0, 0.5, 4.0, -1.0, 2.0],
+            [-0.5, 1.5, 2.0, -3.0, 0.25, 1.0],
+            [2.0, 0.0, -1.0, 0.5, 1.0, -2.0],
+            [3.0, -0.25, 0.75, 2.0, -4.0, 0.5],
+        ],
+        dtype=jnp.float8_e4m3fn,
+    )
+    bits = jax.lax.bitcast_convert_type(quantized, jnp.uint8)
+    scales = jnp.asarray([[0.5, 2.0], [4.0, 0.25]], jnp.float32)
+    dense = dequantize_block_fp8(bits, scales, block_shape=block_shape)
+    expected = quantized.astype(jnp.float32).reshape(2, 2, 2, 3)
+    expected = (expected * scales[:, None, :, None]).reshape(4, 6)
+    assert np.array_equal(dense, expected)
+
+    inputs = jnp.asarray(
+        [[[1.0, 2.0, -1.0, 0.5, 3.0, -2.0]], [[-1.0, 0.25, 2.0, 4.0, -0.5, 1.0]]],
+        jnp.float32,
+    )
+    expected_output = jnp.einsum("...k,nk->...n", inputs, dense, precision=_PRECISION)
+    actual = jax.jit(
+        lambda x, q, s: block_fp8_linear(
+            x,
+            q,
+            s,
+            block_shape=block_shape,
+            compute_dtype=jnp.float32,
+            output_dtype=jnp.float32,
+        )
+    )(inputs, bits, scales)
+    assert np.allclose(actual, expected_output, atol=1e-6, rtol=1e-6)
+
+
+def test_block_fp8_validation_fails_closed():
+    bits = jnp.zeros((4, 6), jnp.uint8)
+    scales = jnp.ones((2, 2), jnp.float32)
+    with pytest.raises(ValueError, match="divisible"):
+        block_fp8_linear(jnp.ones((1, 6)), bits, scales, block_shape=(3, 3))
+    with pytest.raises(ValueError, match="scale grid"):
+        block_fp8_linear(jnp.ones((1, 6)), bits, jnp.ones((1, 2)), block_shape=(2, 3))
+    with pytest.raises(ValueError, match="end in dimension"):
+        block_fp8_linear(jnp.ones((1, 5)), bits, scales, block_shape=(2, 3))
+    with pytest.raises(TypeError, match="uint8 bits"):
+        block_fp8_linear(jnp.ones((1, 6)), bits.astype(jnp.int8), scales, block_shape=(2, 3))
+    with pytest.raises(TypeError, match="inputs must be floating"):
+        block_fp8_linear(jnp.ones((1, 6), jnp.int32), bits, scales, block_shape=(2, 3))
+    with pytest.raises(ValueError, match="reference dtype"):
+        dequantize_block_fp8(bits, scales, block_shape=(2, 3), dtype=jnp.float16)
 
 
 def test_bfloat16_expansion_fails_v4_32_before_activations():
