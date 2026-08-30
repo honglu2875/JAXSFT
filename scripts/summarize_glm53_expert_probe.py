@@ -11,7 +11,41 @@ from typing import Any
 
 
 EXPECTED_OUTPUT_SHA256 = "97effd6c04ae3afcba21d068f829dec80eda6f9b70957949f105596dc133626b"
-EXPECTED_HLO_SHA256 = "924d14e6b7c94449aa2269f0114e365531ba720e84871d356d60c60967b8ec39"
+EXPECTED_HLO_SHA256 = "e3608a6f69bbde3ede1f3e747488fb260522f77a1a1124c346540173ecb7d502"
+EXPECTED_SHAPE_MENTIONS = {
+    "full_down_expert_bank:bf16": 0,
+    "full_down_expert_bank:f32": 0,
+    "full_down_expert_bank:f8e4m3fn": 0,
+    "full_down_expert_bank:u8": 0,
+    "full_gate_up_expert_bank:bf16": 0,
+    "full_gate_up_expert_bank:f32": 0,
+    "full_gate_up_expert_bank:f8e4m3fn": 0,
+    "full_gate_up_expert_bank:u8": 0,
+    "local_down_expert_bank:bf16": 0,
+    "local_down_expert_bank:f32": 0,
+    "local_down_expert_bank:f8e4m3fn": 0,
+    "local_down_expert_bank:u8": 5,
+    "local_gate_up_expert_bank:bf16": 0,
+    "local_gate_up_expert_bank:f32": 0,
+    "local_gate_up_expert_bank:f8e4m3fn": 0,
+    "local_gate_up_expert_bank:u8": 10,
+    "local_selected_down_dense:bf16": 3,
+    "local_selected_down_dense:f32": 0,
+    "local_selected_down_dense:f8e4m3fn": 1,
+    "local_selected_down_dense:u8": 3,
+    "local_selected_gate_up_dense:bf16": 6,
+    "local_selected_gate_up_dense:f32": 0,
+    "local_selected_gate_up_dense:f8e4m3fn": 2,
+    "local_selected_gate_up_dense:u8": 6,
+    "selected_down_dense:bf16": 0,
+    "selected_down_dense:f32": 0,
+    "selected_down_dense:f8e4m3fn": 0,
+    "selected_down_dense:u8": 0,
+    "selected_gate_up_dense:bf16": 0,
+    "selected_gate_up_dense:f32": 0,
+    "selected_gate_up_dense:f8e4m3fn": 0,
+    "selected_gate_up_dense:u8": 0,
+}
 SOURCE_BYTES_PER_DEVICE = 452_984_832
 MAXIMUM_COMPILER_TEMP = 128 * 1024**2
 MAXIMUM_DEVICE_PEAK = 512 * 1024**2
@@ -93,10 +127,8 @@ def summarize(paths: list[Path], *, source_revision: str) -> dict[str, Any]:
         if value.get("optimized_hlo_sha256") != EXPECTED_HLO_SHA256:
             raise ValueError("expert optimized HLO hash drifted")
         mentions = value.get("optimized_hlo_shape_mentions", {})
-        for name, count in mentions.items():
-            if name.endswith(":bf16") or name.endswith(":f32"):
-                if count != 0 and "selected" not in name:
-                    raise ValueError(f"expert HLO contains persistent expanded bank shape {name}")
+        if mentions != EXPECTED_SHAPE_MENTIONS:
+            raise ValueError("expert optimized HLO local/global shape inventory drifted")
         output = value.get("output", {})
         if output.get("finite") is not True or output.get("statistics_float32_sha256") != EXPECTED_OUTPUT_SHA256:
             raise ValueError("expert output was non-finite or drifted")
@@ -159,6 +191,7 @@ def summarize(paths: list[Path], *, source_revision: str) -> dict[str, Any]:
             "statistics_float32_sha256": EXPECTED_OUTPUT_SHA256,
             "all_optimized_hlo_equal": True,
             "optimized_hlo_sha256": EXPECTED_HLO_SHA256,
+            "optimized_hlo_shape_mentions": EXPECTED_SHAPE_MENTIONS,
             "no_persistent_bf16_or_f32_expert_bank_shape": True,
             "all_distributed_shutdowns_complete": True,
         },

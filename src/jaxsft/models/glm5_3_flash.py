@@ -2281,6 +2281,7 @@ class V432LoRAPreflight:
     executable_kernel_proven: bool
     direct_loader_proven: bool
     execution_schema_proven: bool
+    official_expert_kernel_proven: bool
     full_model_forward_proven: bool
     runnable: bool
     blockers: tuple[str, ...]
@@ -2317,6 +2318,7 @@ def v4_32_lora_preflight(
     executable_kernel_proven: bool = False,
     direct_loader_proven: bool = False,
     execution_schema_proven: bool = False,
+    official_expert_kernel_proven: bool = False,
     full_model_forward_proven: bool = False,
     placed_base_per_device_bytes: int | None = None,
     staging_per_host_bytes: int | None = None,
@@ -2401,6 +2403,8 @@ def v4_32_lora_preflight(
         blockers.append("direct-to-final-shard loading has not passed a four-host checksum/peak-RSS test")
     if not execution_schema_proven:
         blockers.append("the complete text checkpoint has not passed tensor-to-executable-schema coverage")
+    if not official_expert_kernel_proven:
+        blockers.append("an official-size packed expert layer has not passed the v4-32 memory/HLO gate")
     if not full_model_forward_proven:
         blockers.append("the complete frozen text model has not passed a measured sharded TPU forward")
     runnable = static_fit and execution_weight_format == "fp8_blockwise" and not blockers
@@ -2420,6 +2424,7 @@ def v4_32_lora_preflight(
         executable_kernel_proven=executable_kernel_proven,
         direct_loader_proven=direct_loader_proven,
         execution_schema_proven=execution_schema_proven,
+        official_expert_kernel_proven=official_expert_kernel_proven,
         full_model_forward_proven=full_model_forward_proven,
         runnable=runnable,
         blockers=tuple(blockers),

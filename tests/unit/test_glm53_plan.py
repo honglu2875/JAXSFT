@@ -5,6 +5,7 @@ import pytest
 
 from scripts.plan_glm53_lora import (
     validate_execution_schema_evidence,
+    validate_expert_kernel_evidence,
     validate_kernel_evidence,
     validate_loader_evidence,
 )
@@ -68,3 +69,17 @@ def test_glm53_execution_schema_evidence_is_complete_and_bounded(tmp_path):
     tampered.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="logical tensor count"):
         validate_execution_schema_evidence(tampered)
+
+
+def test_glm53_official_expert_evidence_enforces_hlo_and_memory_bounds(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    evidence_path = root / "docs" / "results" / "glm53_expert_fp8_v4_probe.json"
+    validated = validate_expert_kernel_evidence(evidence_path)
+    assert validated["source_revision"] == "d2eb6c14a05e7f9c0eda26b32d0bd962be8d00ee"
+
+    payload = json.loads(evidence_path.read_text())
+    payload["expert"]["compiler_temporary_bytes_per_device"] += 1
+    tampered = tmp_path / "expert.json"
+    tampered.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="temporary"):
+        validate_expert_kernel_evidence(tampered)

@@ -97,8 +97,8 @@ Current branch status:
 | G3 block-FP8 primitive on v4 | passed | commit `2bfda04`; [`glm53_fp8_v4_probe.json`](../results/glm53_fp8_v4_probe.json) |
 | G4 direct sharded loader | passed | commit `fb08fcc`; [`glm53_direct_sharded_loader_v4.json`](../results/glm53_direct_sharded_loader_v4.json), [`glm53_checkpoint_header_audit.json`](../results/glm53_checkpoint_header_audit.json) |
 | G5a executable tensor schema | passed | commit `5653518`; [`glm53_execution_schema_audit.json`](../results/glm53_execution_schema_audit.json) |
-| G5b official-size expert kernel | pending | next gate; packed expert HBM/temporary unmeasured |
-| G5c full frozen forward | pending | whole-model load/compile/HBM unproven |
+| G5b official-size expert kernel | passed | commit `d2eb6c1`; [`glm53_expert_fp8_v4_probe.json`](../results/glm53_expert_fp8_v4_probe.json) |
+| G5c full frozen forward | pending | next gate; whole-model load/compile/HBM unproven |
 | G6 bounded LoRA SFT | pending | blocked by G5 |
 
 ### G0 — Metadata and static preflight
@@ -118,6 +118,7 @@ PYTHONPATH=src uv run python scripts/plan_glm53_lora.py \
   --kernel-evidence docs/results/glm53_fp8_v4_probe.json \
   --loader-evidence docs/results/glm53_direct_sharded_loader_v4.json \
   --execution-schema-evidence docs/results/glm53_execution_schema_audit.json \
+  --expert-kernel-evidence docs/results/glm53_expert_fp8_v4_probe.json \
   --rank 8
 ```
 
@@ -213,6 +214,16 @@ the full checkpoint or measure TPU memory.
   buffers, throughput, and numerical comparison on fixed public prompts.
 - Replace the placeholder 8 GiB activation and 2 GiB runtime/dequant reserves
   with measured upper bounds plus explicit safety margin.
+
+Measured G5b result: one 288-expert gate/up/down bank contains 7,247,757,312
+FP8 bytes globally and 452,984,832 bytes per chip. A one-token top-8 execution
+reported 455,361,024 compiler argument bytes and 75,884,544 temporary bytes per
+chip. Peak device bytes in use were 457,929,216; optimized local HLO retained
+the sharded uint8 banks, contained no full local BF16/F32 expert-bank shape,
+and materialized only selected BF16 shards. All four processes had identical
+HLO and output hashes, zero `/dev/shm` delta, and clean shutdowns. This passes
+G5b, but the selected-weight temporary grows with `tokens * top_k`; it is not
+the long-sequence G6 dispatch design.
 
 ### G6 — Bounded LoRA SFT
 

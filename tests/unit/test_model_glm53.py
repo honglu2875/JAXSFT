@@ -429,7 +429,7 @@ def test_fp8_preflight_distinguishes_byte_fit_from_execution_evidence():
     assert not unproven.runnable
     assert unproven.adapter_parameter_count == 20_578_304
     assert unproven.free_per_device_bytes > 0
-    assert len(unproven.blockers) == 4
+    assert len(unproven.blockers) == 5
 
     schema_proven = v4_32_lora_preflight(
         config,
@@ -438,6 +438,7 @@ def test_fp8_preflight_distinguishes_byte_fit_from_execution_evidence():
         executable_kernel_proven=True,
         direct_loader_proven=True,
         execution_schema_proven=True,
+        official_expert_kernel_proven=True,
         placed_base_per_device_bytes=20_234_287_352,
         staging_per_host_bytes=150_994_944,
     )
@@ -456,6 +457,7 @@ def test_fp8_preflight_distinguishes_byte_fit_from_execution_evidence():
         executable_kernel_proven=True,
         direct_loader_proven=True,
         execution_schema_proven=True,
+        official_expert_kernel_proven=True,
         full_model_forward_proven=True,
         placed_base_per_device_bytes=20_234_287_352,
         staging_per_host_bytes=150_994_944,

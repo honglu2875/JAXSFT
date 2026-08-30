@@ -396,6 +396,87 @@ def validate_execution_schema_evidence(path: Path) -> dict:
     }
 
 
+def validate_expert_kernel_evidence(path: Path) -> dict:
+    """Validate G5b's official-size packed-expert v4-32 acceptance."""
+
+    payload, payload_bytes = _load_unique_json(path, label="expert kernel evidence")
+    mismatches: list[str] = []
+
+    def require(condition: bool, message: str) -> None:
+        if not condition:
+            mismatches.append(message)
+
+    source_revision = payload.get("source_revision")
+    require(payload.get("schema_version") == 1, "schema_version must be 1")
+    require(
+        payload.get("test") == "glm53_g5b_official_expert_acceptance",
+        "unexpected test identity",
+    )
+    require(
+        isinstance(source_revision, str)
+        and len(source_revision) == 40
+        and all(character in "0123456789abcdef" for character in source_revision),
+        "source_revision must be a full lowercase Git hash",
+    )
+    require(
+        payload.get("topology")
+        == {
+            "accelerator_type": "v4-32",
+            "global_device_count": 16,
+            "host_count": 4,
+            "process_count": 4,
+        },
+        "expert topology mismatch",
+    )
+    expert = payload.get("expert", {})
+    expected_scalars = {
+        "source_fp8_bytes_global": 7_247_757_312,
+        "source_fp8_bytes_per_device": 452_984_832,
+        "selected_bf16_weight_bytes_global": 402_653_184,
+        "compiler_argument_bytes_per_device": 455_361_024,
+        "compiler_temporary_bytes_per_device": 75_884_544,
+        "maximum_device_bytes_in_use": 457_928_704,
+        "maximum_device_peak_bytes_in_use": 457_929_216,
+        "maximum_process_vmhwm_bytes": 6_532_288_512,
+        "maximum_shm_used_delta_bytes": 0,
+    }
+    for name, expected in expected_scalars.items():
+        require(expert.get(name) == expected, f"expert {name} mismatch")
+    require(
+        expert.get("statistics_float32_sha256")
+        == "97effd6c04ae3afcba21d068f829dec80eda6f9b70957949f105596dc133626b",
+        "expert output hash mismatch",
+    )
+    require(
+        expert.get("optimized_hlo_sha256")
+        == "e3608a6f69bbde3ede1f3e747488fb260522f77a1a1124c346540173ecb7d502",
+        "expert optimized HLO hash mismatch",
+    )
+    mentions = expert.get("optimized_hlo_shape_mentions", {})
+    for prefix in ("local_gate_up_expert_bank", "local_down_expert_bank"):
+        require(mentions.get(prefix + ":bf16") == 0, f"{prefix} has a persistent BF16 shape")
+        require(mentions.get(prefix + ":f32") == 0, f"{prefix} has a persistent F32 shape")
+        require(mentions.get(prefix + ":u8", 0) > 0, f"{prefix} has no sharded uint8 source")
+    for claim in (
+        "all_outputs_equal",
+        "all_optimized_hlo_equal",
+        "no_persistent_bf16_or_f32_expert_bank_shape",
+        "all_distributed_shutdowns_complete",
+    ):
+        require(expert.get(claim) is True, f"expert claim {claim} is not true")
+    gate = payload.get("gate", {})
+    require(gate.get("g5b_official_expert_kernel") == "passed", "G5b is not marked passed")
+    require(gate.get("full_model_runnable") is False, "G5b must not claim a runnable model")
+    if mismatches:
+        raise ValueError("invalid GLM-5.3 expert kernel evidence: " + "; ".join(mismatches))
+    return {
+        "path": str(path),
+        "sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        "source_revision": source_revision,
+        "test": payload["test"],
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True, help="pinned config.json")
@@ -421,6 +502,11 @@ def main() -> int:
         type=Path,
         help="tracked G5a JSON evidence covering every text tensor and expert pack",
     )
+    parser.add_argument(
+        "--expert-kernel-evidence",
+        type=Path,
+        help="tracked G5b JSON evidence for one official-size packed expert layer",
+    )
     args = parser.parse_args()
 
     config_hash = _sha256(args.config)
@@ -438,6 +524,11 @@ def main() -> int:
         if args.execution_schema_evidence
         else None
     )
+    expert_evidence = (
+        validate_expert_kernel_evidence(args.expert_kernel_evidence)
+        if args.expert_kernel_evidence
+        else None
+    )
     staging_bounds = [
         evidence["staging_per_host_bytes"]
         for evidence in (loader_evidence, schema_evidence)
@@ -451,6 +542,7 @@ def main() -> int:
         executable_kernel_proven=kernel_evidence is not None,
         direct_loader_proven=loader_evidence is not None,
         execution_schema_proven=schema_evidence is not None,
+        official_expert_kernel_proven=expert_evidence is not None,
         placed_base_per_device_bytes=(
             loader_evidence["placed_base_per_device_bytes"] if loader_evidence else None
         ),
@@ -474,11 +566,12 @@ def main() -> int:
             "kernel": kernel_evidence,
             "direct_loader": loader_evidence,
             "execution_schema": schema_evidence,
+            "expert_kernel": expert_evidence,
         },
         "warning": (
-            "G3/G4/G5a evidence proves a real block-FP8 contraction, bounded direct sharding, and "
-            "complete schema coverage, not the full model; runnable remains false until the "
-            "whole-model forward/HBM gate passes"
+            "G3/G4/G5a/G5b evidence proves real block-FP8 contractions, bounded direct sharding, "
+            "complete schema coverage, and one official-size expert layer, not the full model; "
+            "runnable remains false until the whole-model forward/HBM gate passes"
         ),
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
