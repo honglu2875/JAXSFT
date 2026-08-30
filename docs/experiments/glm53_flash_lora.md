@@ -40,11 +40,11 @@ dequantization buffers. Expanding the floating tensors to BF16 requires
 BF16 copy is rejected.
 
 TPU v4 does not make the checkpoint's FP8 serialization directly executable by
-assumption. The only candidate is to retain block-FP8 frozen weights, perform a
-scale-aware tiled conversion at each contraction, and demonstrate that XLA
-does not materialize or retain a full BF16 copy. Until compiled HBM profiles
-prove that property, the plan may report `static_fit: true` but must report
-`runnable: false`.
+assumption. The G3 probe now demonstrates one real 1536x4096 block-FP8
+contraction with scale-aware 128x128 conversion and no full BF16/F32 weight in
+optimized HLO. This is kernel evidence, not a whole-model capacity result. The
+plan may mark `executable_kernel_proven: true`, but remains `runnable: false`
+until direct final-shard loading and full-model HBM measurements pass.
 
 The source files are serialization shards, not mesh/FSDP shards. Assigning one
 file to one host is therefore incorrect: a final tensor partition can require
@@ -86,7 +86,7 @@ Current branch status:
 | G0 metadata/static preflight | passed | commit `3966ee1`; real pinned index/config checked |
 | G1 generic LoRA correctness | passed | commit `2ebff99`; separate adapter tree and merge/gradient tests |
 | G2 reduced architecture parity | passed | commit `1ca6ccf`; [`glm53_reduced_hybrid_cpu_parity.json`](../results/glm53_reduced_hybrid_cpu_parity.json) |
-| G3 block-FP8 primitive on v4 | pending | no executable/HBM evidence yet |
+| G3 block-FP8 primitive on v4 | passed | commit `2bfda04`; [`glm53_fp8_v4_probe.json`](../results/glm53_fp8_v4_probe.json) |
 | G4 direct sharded loader | pending | no four-host checksum/RSS evidence yet |
 | G5 full frozen forward | pending | blocked by G3/G4 |
 | G6 bounded LoRA SFT | pending | blocked by G3--G5 |
@@ -105,6 +105,7 @@ Run after fetching only `config.json` and `model.safetensors.index.json`:
 PYTHONPATH=src uv run python scripts/plan_glm53_lora.py \
   --config /path/to/config.json \
   --index /path/to/model.safetensors.index.json \
+  --kernel-evidence docs/results/glm53_fp8_v4_probe.json \
   --rank 8
 ```
 
@@ -130,7 +131,7 @@ Expected result at this gate: `static_fit: true`, `runnable: false` for
   Adam update against an independent Transformers/PyTorch reference.
 - Record drift over 10--50 updates; do not judge parity from one step.
 
-### G3 — Block-FP8 primitive on one v4 chip
+### G3 — Block-FP8 primitive on v4
 
 - Range-read a small real weight plus its `weight_scale_inv` tensor.
 - Verify dequantization against the Transformers reference in float32/BF16.
@@ -138,6 +139,13 @@ Expected result at this gate: `static_fit: true`, `runnable: false` for
   precision and capture HLO plus peak HBM.
 - Fail if XLA retains a full BF16 weight, dequantization error is unexplained,
   or memory scales as source FP8 plus persistent BF16.
+
+Measured result: exact HTTP ranges returned the pinned 6,291,456-byte
+`q_a_proj` and 1,536-byte scale grid without downloading the 5.4 GB source
+shard. Float32 JAX versus Transformers was `2.89e-7` relative L2. Four v4-32
+processes produced the same BF16 output hash; TPU versus CPU BF16 was `1.18e-7`
+relative L2. The tiled TPU executable reported 225,792 temporary bytes and no
+full-size BF16/F32/FP8 weight in optimized HLO. This passes G3 only.
 
 ### G4 — Direct-to-final-shard loader
 
