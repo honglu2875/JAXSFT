@@ -9,6 +9,7 @@ from jaxsft.models.glm5_3_flash import (
     Glm53TextConfig,
     SafetensorsIndex,
     attention_lora_parameter_count,
+    attention_lora_target_paths,
     v4_32_lora_preflight,
 )
 
@@ -121,7 +122,12 @@ def test_attention_lora_count_uses_architecture_specific_matrix_shapes():
     # KDA: four 32x32 targets => 4 * rank * (32 + 32) = 1,024.
     # Sparse attention: q_a/q_b/kv_a/kv_b/o => rank * 248 = 992.
     assert attention_lora_parameter_count(tiny, rank=4) == 2_016
-    assert attention_lora_parameter_count(_official_config(), rank=8) == 20_578_304
+    official = _official_config()
+    assert attention_lora_parameter_count(official, rank=8) == 20_578_304
+    targets = attention_lora_target_paths(official)
+    assert len(targets) == 34 * 4 + 11 * 5
+    assert ("layers", 0, "self_attn", "q_proj") in targets
+    assert ("layers", 3, "self_attn", "kv_b_proj") in targets
 
 
 def test_safetensors_index_is_strict_and_verifies_contract(tmp_path):

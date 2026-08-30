@@ -443,6 +443,26 @@ def attention_lora_parameter_count(
     )
 
 
+def attention_lora_target_paths(
+    config: Glm53TextConfig,
+    *,
+    include_sparse_indexer: bool = False,
+) -> tuple[tuple[str | int, ...], ...]:
+    """Declare the exact JAX parameter paths eligible for initial GLM LoRA."""
+
+    paths: list[tuple[str | int, ...]] = []
+    for layer_index, layer_type in enumerate(config.layer_types):
+        prefix: tuple[str | int, ...] = ("layers", layer_index, "self_attn")
+        if layer_type == "linear_attention":
+            names = ("q_proj", "k_proj", "v_proj", "o_proj")
+        else:
+            names = ("q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "kv_b_proj", "o_proj")
+        paths.extend(prefix + (name,) for name in names)
+        if layer_type == "deepseek_sparse_attention" and include_sparse_indexer:
+            paths.extend(prefix + ("indexer", name) for name in ("weights_proj", "wk", "wq_b"))
+    return tuple(paths)
+
+
 @dataclass(frozen=True)
 class MemoryLine:
     name: str
@@ -593,5 +613,6 @@ __all__ = [
     "SafetensorsIndex",
     "V432LoRAPreflight",
     "attention_lora_parameter_count",
+    "attention_lora_target_paths",
     "v4_32_lora_preflight",
 ]
