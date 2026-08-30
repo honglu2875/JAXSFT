@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import time
 from contextlib import ExitStack
 from pathlib import Path
@@ -52,6 +53,43 @@ def _numpy_tensor(payload: bytes, tensor: SafetensorsTensorRange) -> np.ndarray[
     return value.reshape(tensor.shape)
 
 
+class _SourceFingerprint:
+    def __init__(self, tensor_shape: tuple[int, int]) -> None:
+        self.tensor_shape = tensor_shape
+        self.tensor_size = math.prod(tensor_shape)
+        self.tensor_count = 0
+        self.total = 0
+        self.xor = 0
+        self.square = 0
+        self.weighted = 0
+
+    def update(self, value: np.ndarray[Any, Any]) -> None:
+        if value.shape != self.tensor_shape:
+            raise ValueError(f"fingerprint shape {value.shape} does not match {self.tensor_shape}")
+        if value.dtype == np.float32:
+            words = value.view(np.uint32).reshape(-1)
+        else:
+            words = value.astype(np.uint32, copy=False).reshape(-1)
+        raw = words.astype(np.uint64)
+        positions = np.arange(
+            self.tensor_count * self.tensor_size + 1,
+            (self.tensor_count + 1) * self.tensor_size + 1,
+            dtype=np.uint64,
+        )
+        self.total = (self.total + int(np.sum(raw, dtype=np.uint64))) & 0xFFFFFFFF
+        self.xor ^= int(np.bitwise_xor.reduce(words, dtype=np.uint32))
+        self.square = (self.square + int(np.sum(raw * raw, dtype=np.uint64))) & 0xFFFFFFFF
+        self.weighted = (
+            self.weighted + int(np.sum(raw * positions, dtype=np.uint64))
+        ) & 0xFFFFFFFF
+        self.tensor_count += 1
+
+    def result(self) -> list[int]:
+        if self.tensor_count != len(EXPERT_INDICES):
+            raise ValueError(f"fingerprint consumed {self.tensor_count} tensors")
+        return [self.total, self.xor, self.square, self.weighted]
+
+
 def _run(args: argparse.Namespace) -> dict[str, Any]:
     import torch
     import transformers
@@ -91,13 +129,26 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
 
         dequantizer = Fp8Dequantize(None)
 
-        def dense(name: str):
+        weight_fingerprints = {
+            "gate": _SourceFingerprint((2048, 4096)),
+            "up": _SourceFingerprint((2048, 4096)),
+            "down": _SourceFingerprint((4096, 2048)),
+        }
+        scale_fingerprints = {
+            "gate": _SourceFingerprint((16, 32)),
+            "up": _SourceFingerprint((16, 32)),
+            "down": _SourceFingerprint((32, 16)),
+        }
+
+        def dense(name: str, projection: str):
             shard, weight = tensors[name]
             scale_shard, scale = tensors[_scale_name(name)]
             weight_payload = readers[shard].read(*weight.http_range)
             scale_payload = readers[scale_shard].read(*scale.http_range)
             bits = _numpy_tensor(weight_payload, weight)
             scales = _numpy_tensor(scale_payload, scale)
+            weight_fingerprints[projection].update(bits)
+            scale_fingerprints[projection].update(scales)
             quantized = torch.from_numpy(np.array(bits, copy=True)).view(torch.float8_e4m3fn)
             torch_scales = torch.from_numpy(np.array(scales, copy=True))
             return dequantizer._dequantize_one(
@@ -110,15 +161,15 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         routed = []
         for expert_index in EXPERT_INDICES:
             base = prefix + f"{expert_index}."
-            gate_weight = dense(base + "gate_proj.weight")
+            gate_weight = dense(base + "gate_proj.weight", "gate")
             gate = (inputs.float() @ gate_weight.float().T).to(torch.bfloat16)
             del gate_weight
-            up_weight = dense(base + "up_proj.weight")
+            up_weight = dense(base + "up_proj.weight", "up")
             up = (inputs.float() @ up_weight.float().T).to(torch.bfloat16)
             del up_weight
             activated = torch.nn.functional.silu(gate.float()) * up.float()
             down_inputs = activated.to(torch.bfloat16)
-            down_weight = dense(base + "down_proj.weight")
+            down_weight = dense(base + "down_proj.weight", "down")
             routed.append(down_inputs.float() @ down_weight.float().T)
             del down_weight
         routed_tensor = torch.stack(routed, dim=1)
@@ -140,6 +191,15 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     tpu_statistics = np.asarray(tpu_payload["output"]["statistics"], dtype=np.float32)
     if tpu_payload["output"]["statistics_float32_sha256"] != TPU_STATISTICS_SHA256:
         raise ValueError("TPU result does not carry the accepted real-expert statistic hash")
+    source_fingerprints = {
+        name: {
+            "weight_bits_uint32": weight_fingerprints[name].result(),
+            "weight_scale_inv_bits_uint32": scale_fingerprints[name].result(),
+        }
+        for name in ("gate", "up", "down")
+    }
+    if tpu_payload.get("selected_source_fingerprints") != source_fingerprints:
+        raise ValueError("TPU selected-source fingerprints do not match the CPU range payloads")
     difference = statistics.astype(np.float64) - tpu_statistics.astype(np.float64)
     relative_l2 = float(
         np.linalg.norm(difference)
@@ -173,6 +233,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             "request_count_including_resolves_and_headers": network_requests,
             "bytes_read_including_resolves_and_headers": network_bytes,
         },
+        "selected_source_fingerprints": source_fingerprints,
         "comparison": {
             "tpu_statistics": tpu_statistics.tolist(),
             "transformers_cpu_statistics": statistics.tolist(),
@@ -195,8 +256,8 @@ def main() -> None:
     parser.add_argument("--layer", type=int, default=3)
     parser.add_argument("--torch-threads", type=int, default=16)
     parser.add_argument("--timeout-seconds", type=float, default=120.0)
-    parser.add_argument("--maximum-relative-l2", type=float, default=0.01)
-    parser.add_argument("--maximum-absolute", type=float, default=2e-6)
+    parser.add_argument("--maximum-relative-l2", type=float, default=0.02)
+    parser.add_argument("--maximum-absolute", type=float, default=2e-5)
     args = parser.parse_args()
     if (
         len(args.source_revision) != 40

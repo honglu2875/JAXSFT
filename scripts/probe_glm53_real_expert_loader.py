@@ -102,6 +102,36 @@ def _memory_analysis(compiled: Any) -> dict[str, int | None]:
     return {name: getattr(analysis, name, None) for name in names}
 
 
+def _selected_source_fingerprint(value: jax.Array) -> jax.Array:
+    """Four exact uint32 checks over the selected source tensors in global order."""
+
+    selected = value[jnp.asarray(EXPERT_INDICES, jnp.int32)]
+    if jnp.issubdtype(selected.dtype, jnp.floating):
+        if selected.dtype != jnp.float32:
+            raise TypeError("source scale fingerprints require float32 values")
+        selected = jax.lax.bitcast_convert_type(selected, jnp.uint32)
+    else:
+        selected = selected.astype(jnp.uint32)
+    position = (
+        jnp.arange(selected.shape[0], dtype=jnp.uint32).reshape(-1, 1, 1)
+        * np.uint32(selected.shape[1] * selected.shape[2])
+        + jnp.arange(selected.shape[1], dtype=jnp.uint32).reshape(1, -1, 1)
+        * np.uint32(selected.shape[2])
+        + jnp.arange(selected.shape[2], dtype=jnp.uint32).reshape(1, 1, -1)
+    )
+    xor = selected
+    for axis in reversed(range(selected.ndim)):
+        xor = jnp.bitwise_xor.reduce(xor, axis=axis)
+    return jnp.stack(
+        (
+            jnp.sum(selected, dtype=jnp.uint32),
+            xor,
+            jnp.sum(selected * selected, dtype=jnp.uint32),
+            jnp.sum(selected * (position + np.uint32(1)), dtype=jnp.uint32),
+        )
+    )
+
+
 def _expert_forward(
     inputs: jax.Array,
     indices: jax.Array,
@@ -206,6 +236,28 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     if not all(arrays[index].sharding == replicated for index in (1, 3, 5)):
         raise ValueError("real expert scale grids are not replicated")
 
+    source_fingerprints = {}
+    for name, kernel in (("gate", gate), ("up", up), ("down", down)):
+        bits_fingerprint = jax.jit(
+            _selected_source_fingerprint,
+            in_shardings=kernel.weight_bits.sharding,
+            out_shardings=replicated,
+        )(kernel.weight_bits)
+        scale_fingerprint = jax.jit(
+            _selected_source_fingerprint,
+            in_shardings=replicated,
+            out_shardings=replicated,
+        )(kernel.weight_scale_inv)
+        source_fingerprints[name] = {
+            "weight_bits_uint32": [
+                int(value) for value in np.asarray(bits_fingerprint.block_until_ready())
+            ],
+            "weight_scale_inv_bits_uint32": [
+                int(value) for value in np.asarray(scale_fingerprint.block_until_ready())
+            ],
+        }
+    device_memory["after_source_fingerprints"] = _device_memory()
+
     inputs = jax.device_put(jnp.full((1, HIDDEN_SIZE), 0.01, jnp.bfloat16), replicated)
     indices = jax.device_put(jnp.asarray([EXPERT_INDICES], jnp.int32), replicated)
     compiled = jax.jit(
@@ -259,6 +311,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             "precision": str(jax.lax.Precision.HIGHEST),
         },
         "loader": network,
+        "selected_source_fingerprints": source_fingerprints,
         "compiler_memory": _memory_analysis(compiled),
         "optimized_hlo_sha256": hashlib.sha256(optimized_hlo.encode()).hexdigest(),
         "output": {
