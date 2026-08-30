@@ -1,15 +1,25 @@
 import json
 
+import jax
+import jax.numpy as jnp
+import numpy as np
 import pytest
 
+from jaxsft.lora import LoRAConfig, format_parameter_path, init_lora_adapters, merge_lora_adapters
 from jaxsft.models.glm5_3_flash import (
     GIB,
     OFFICIAL_CHECKPOINT,
+    _PRECISION,
     CheckpointContract,
     Glm53TextConfig,
     SafetensorsIndex,
     attention_lora_parameter_count,
     attention_lora_target_paths,
+    forward,
+    init_params,
+    parameter_count,
+    tiny_config,
+    validate_params,
     v4_32_lora_preflight,
 )
 
@@ -62,6 +72,7 @@ def _config_dict(*, official_shapes: bool = False):
             "num_key_value_heads": num_heads,
             "layer_types": layer_types,
             "mlp_layer_types": mlp_types,
+            "indexer_types": ("full",) * len(layer_types),
             "linear_attn_config": {
                 "num_heads": linear_heads,
                 "head_dim": linear_head_dim,
@@ -85,6 +96,9 @@ def _config_dict(*, official_shapes: bool = False):
             "hc_mult": 4,
             "index_n_heads": num_heads // 2,
             "index_head_dim": head_dim,
+            "index_topk": 2048 if official_shapes else 4,
+            "index_kpool": 4 if official_shapes else 2,
+            "index_kpool_compress": True,
         },
         "quantization_config": {
             "quant_method": "fp8",
@@ -198,3 +212,77 @@ def test_fp8_preflight_distinguishes_byte_fit_from_execution_evidence():
     assert proven.static_fit
     assert proven.runnable
     assert not proven.blockers
+
+
+def test_reduced_hybrid_model_forward_backward_and_shapes():
+    assert _PRECISION is jax.lax.Precision.HIGHEST
+    config = tiny_config(vocab_size=64)
+    params = init_params(jax.random.key(0), config, dtype=jnp.float32)
+    validate_params(params, config)
+    assert parameter_count(config) == sum(value.size for value in jax.tree.leaves(params))
+    ids = jnp.array([[1, 2, 3, 4], [4, 3, 0, 0]], jnp.int32)
+    mask = jnp.array([[1, 1, 1, 1], [1, 1, 0, 0]], bool)
+    logits = forward(params, config, ids, attention_mask=mask)
+    assert logits.shape == (2, 4, 64)
+    assert np.asarray(jnp.isfinite(logits).all())
+
+    selected = {
+        "embed_tokens": params["embed_tokens"],
+        "lm_head": params["lm_head"],
+    }
+
+    def endpoint_loss(endpoints):
+        replaced = dict(params)
+        replaced.update(endpoints)
+        return jnp.mean(forward(replaced, config, ids, attention_mask=mask) ** 2)
+
+    gradients = jax.grad(endpoint_loss)(selected)
+    assert all(np.asarray(jnp.isfinite(value).all()) for value in jax.tree.leaves(gradients))
+
+
+def test_glm_attention_lora_zero_identity_and_merged_equivalence():
+    config = tiny_config(vocab_size=48)
+    params = init_params(jax.random.key(5), config, dtype=jnp.float32)
+    targets = attention_lora_target_paths(config)
+    lora_config = LoRAConfig(rank=2, alpha=4)
+    adapters = init_lora_adapters(
+        jax.random.key(6),
+        params,
+        targets,
+        eligible_paths=targets,
+        config=lora_config,
+        dtype=jnp.float32,
+    )
+    ids = jnp.array([[1, 2, 3, 4]], jnp.int32)
+    base_logits = forward(params, config, ids)
+    identity_logits = forward(params, config, ids, adapters=adapters, lora_config=lora_config)
+    assert np.array_equal(base_logits, identity_logits)
+
+    first_name = format_parameter_path(targets[0])
+    adapters[first_name]["b"] = jnp.arange(adapters[first_name]["b"].size, dtype=jnp.float32).reshape(
+        adapters[first_name]["b"].shape
+    ) / 100
+    unmerged = forward(params, config, ids, adapters=adapters, lora_config=lora_config)
+    merged_params = merge_lora_adapters(params, adapters, targets, config=lora_config)
+    merged = forward(merged_params, config, ids)
+    assert np.allclose(unmerged, merged, atol=3e-6, rtol=3e-6)
+
+    gradients = jax.grad(
+        lambda trainable: jnp.mean(
+            forward(params, config, ids, adapters=trainable, lora_config=lora_config) ** 2
+        )
+    )(adapters)
+    assert all(np.asarray(jnp.isfinite(value).all()) for value in jax.tree.leaves(gradients))
+
+
+def test_right_padding_does_not_change_valid_prefix_logits():
+    config = tiny_config(vocab_size=32)
+    params = init_params(jax.random.key(9), config)
+    short = forward(params, config, jnp.array([[2, 3, 4]], jnp.int32))
+    padded = forward(
+        params,
+        config,
+        jnp.array([[2, 3, 4, 0, 0]], jnp.int32),
+        attention_mask=jnp.array([[1, 1, 1, 0, 0]], bool),
+    )
+    assert np.allclose(short, padded[:, :3], atol=3e-6, rtol=3e-6)
