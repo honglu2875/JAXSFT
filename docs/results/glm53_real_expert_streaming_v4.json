@@ -1,0 +1,117 @@
+{
+  "execution": {
+    "all_distributed_shutdowns_complete": true,
+    "all_optimized_hlo_equal": true,
+    "all_outputs_equal": true,
+    "compiler_argument_bytes_per_device": 455361024,
+    "compiler_temporary_bytes_per_device": 75884544,
+    "maximum_device_peak_bytes_in_use": 459828736,
+    "maximum_elapsed_seconds": 33.81203049584292,
+    "maximum_process_vmhwm_bytes": 5620817920,
+    "maximum_shm_used_delta_bytes": 0,
+    "optimized_hlo_sha256": "cfc69a283323a02652a2b5cfe026b6da9f430fa487b2d4f3433237adeda58f24",
+    "placed_bytes_per_device": 455357952,
+    "statistics_float32_sha256": "046a54bf22934b0271d5dd30e8cfd5349190147d5252f7d5310e1ae0a0b2bbf7"
+  },
+  "gate": {
+    "full_model_runnable": false,
+    "g5c_real_expert_streaming": "passed",
+    "remaining_blockers": [
+      "The complete 1,372-target text PyTree has not been streamed onto v4-32.",
+      "Whole-model compilation, HBM, and a one-token frozen forward remain unmeasured.",
+      "Long-sequence SFT still requires a capacity-bounded expert-dispatch kernel."
+    ]
+  },
+  "oracle_result_sha256": "1d54c07a3aa087b5318e82a0ca0436780071667043bc525ba1f90ba6ce9f37ef",
+  "rank_result_sha256": [
+    "c6334b69969bdab6fe9faa5539779e57d0a46d5d99e2af4e832d50c37f5e29f1",
+    "780348d92f45e1500f514d4e75ba6ee9129304c615dc2cf2999efe8cd8ed6963",
+    "5d9919f3c575a23456260c397eb9365fb454c5651bc9d822c568e62575d14744",
+    "9d3b86bf490fc5db954639c05b5b874be402038d3b1645df69c4ada8b07002db"
+  ],
+  "schema_version": 1,
+  "source_revision": "3869a9b6e12704bcd52dac6499d8620ea4ca5efe",
+  "streaming": {
+    "all_tpu_source_fingerprints_equal": true,
+    "maximum_expert_host_buffer_bytes": 603979776,
+    "maximum_single_range_bytes": 2097152,
+    "real_expert_fp8_bytes_global": 7247757312,
+    "real_expert_fp8_bytes_per_device": 452984832,
+    "real_expert_fp8_bytes_per_host": 1811939328,
+    "selected_source_fingerprints": {
+      "down": {
+        "weight_bits_uint32": [
+          2547530454,
+          234,
+          4069122540,
+          2591194520
+        ],
+        "weight_scale_inv_bits_uint32": [
+          205523066,
+          4194314,
+          1618318052,
+          2641454218
+        ]
+      },
+      "gate": {
+        "weight_bits_uint32": [
+          2532608034,
+          14,
+          3442219676,
+          6421482
+        ],
+        "weight_scale_inv_bits_uint32": [
+          2475241188,
+          12582922,
+          3777101266,
+          982101497
+        ]
+      },
+      "up": {
+        "weight_bits_uint32": [
+          2537129703,
+          109,
+          636097807,
+          107821607
+        ],
+        "weight_scale_inv_bits_uint32": [
+          3011513093,
+          2396747,
+          763879255,
+          4034090950
+        ]
+      }
+    },
+    "source_payload_downloaded_exactly_once_across_slice": true,
+    "total_network_bytes_across_hosts": 7259453480,
+    "transformers_cpu_source_fingerprints_equal": true
+  },
+  "test": "glm53_g5c_real_expert_streaming_acceptance",
+  "topology": {
+    "accelerator_type": "v4-32",
+    "global_device_count": 16,
+    "host_count": 4,
+    "process_count": 4
+  },
+  "transformers_cpu_oracle": {
+    "maximum_absolute": 1.5417346730828285e-05,
+    "maximum_absolute_tolerance": 2e-05,
+    "passed": true,
+    "relative_l2": 0.015828731402511426,
+    "relative_l2_tolerance": 0.02,
+    "statistics": [
+      -0.0009776941733434796,
+      3.9720202948956285e-06,
+      0.00010994894546456635,
+      -0.00010449982801219448
+    ],
+    "torch_version": "2.10.0+cpu",
+    "tpu_statistics": [
+      -0.0009622768266126513,
+      3.966040821978822e-06,
+      0.0001098601205740124,
+      -0.00010427222878206521
+    ],
+    "transformers_version": "5.16.1"
+  }
+}

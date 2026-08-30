@@ -98,7 +98,8 @@ Current branch status:
 | G4 direct sharded loader | passed | commit `fb08fcc`; [`glm53_direct_sharded_loader_v4.json`](../results/glm53_direct_sharded_loader_v4.json), [`glm53_checkpoint_header_audit.json`](../results/glm53_checkpoint_header_audit.json) |
 | G5a executable tensor schema | passed | commit `5653518`; [`glm53_execution_schema_audit.json`](../results/glm53_execution_schema_audit.json) |
 | G5b official-size expert kernel | passed | commit `d2eb6c1`; [`glm53_expert_fp8_v4_probe.json`](../results/glm53_expert_fp8_v4_probe.json) |
-| G5c full frozen forward | pending | next gate; whole-model load/compile/HBM unproven |
+| G5c1 real checkpoint expert streaming | passed | commit `3869a9b`; [`glm53_real_expert_streaming_v4.json`](../results/glm53_real_expert_streaming_v4.json) |
+| G5c2 full frozen forward | pending | next gate; whole-model load/compile/HBM unproven |
 | G6 bounded LoRA SFT | pending | blocked by G5 |
 
 ### G0 — Metadata and static preflight
@@ -224,6 +225,19 @@ and materialized only selected BF16 shards. All four processes had identical
 HLO and output hashes, zero `/dev/shm` delta, and clean shutdowns. This passes
 G5b, but the selected-weight temporary grows with `tokens * top_k`; it is not
 the long-sequence G6 dispatch design.
+
+Measured G5c1 result: the loader range-read the real layer-3 gate, up, and down
+expert banks from two pinned safetensors files. Each host fetched its disjoint
+1,811,939,328-byte quarter, so the 7,247,757,312-byte source payload was
+downloaded exactly once across the slice. Each chip held 455,357,952 bytes
+after placement. Four ranks produced identical raw-bit/scale fingerprints,
+HLO, and output statistics despite Cloud TPU process order differing from the
+hostname suffix order. Independently range-read Transformers 5.16.1/PyTorch
+2.10 CPU tensors matched all six selected source fingerprints exactly. Its
+BF16 statistic comparison was 1.583% relative L2 and `1.54e-5` maximum
+absolute error under explicit 2%/`2e-5` cross-backend bounds; most of the
+relative error came from the near-zero logits sum. This validates real source
+assembly and one real expert contraction, not the complete model.
 
 ### G6 — Bounded LoRA SFT
 
