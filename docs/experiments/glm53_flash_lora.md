@@ -79,6 +79,18 @@ is used here.
 Each stage produces committed code/tests or a machine-readable evidence file.
 A later stage must not be advertised if an earlier gate is red.
 
+Current branch status:
+
+| Gate | Status | Evidence |
+|---|---|---|
+| G0 metadata/static preflight | passed | commit `3966ee1`; real pinned index/config checked |
+| G1 generic LoRA correctness | passed | commit `2ebff99`; separate adapter tree and merge/gradient tests |
+| G2 reduced architecture parity | passed | commit `1ca6ccf`; [`glm53_reduced_hybrid_cpu_parity.json`](../results/glm53_reduced_hybrid_cpu_parity.json) |
+| G3 block-FP8 primitive on v4 | pending | no executable/HBM evidence yet |
+| G4 direct sharded loader | pending | no four-host checksum/RSS evidence yet |
+| G5 full frozen forward | pending | blocked by G3/G4 |
+| G6 bounded LoRA SFT | pending | blocked by G3--G5 |
+
 ### G0 — Metadata and static preflight
 
 - Parse and hash the pinned config and index without downloading weights.

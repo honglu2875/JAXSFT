@@ -1,0 +1,47 @@
+{
+  "backend": "cpu",
+  "executed_at_utc": "2026-08-30T21:01:16Z",
+  "execution_host": "t1v-n-51c6aeb6-w-0",
+  "config": {
+    "experts_per_token": 2,
+    "hc_mult": 2,
+    "hidden_size": 32,
+    "layers": [
+      "linear_attention",
+      "deepseek_sparse_attention"
+    ],
+    "mlp_layers": [
+      "dense",
+      "sparse"
+    ],
+    "routed_experts": 4
+  },
+  "dtype": "float32",
+  "metrics": {
+    "kda_q_proj_gradient": {
+      "max_abs": 1.564621925354004e-07,
+      "mean_abs": 1.2193671850013743e-08,
+      "relative_l2": 3.4698986996353885e-07
+    },
+    "loss_abs": 4.76837158203125e-07,
+    "shared_expert_up_gradient": {
+      "max_abs": 1.862645149230957e-08,
+      "mean_abs": 3.0501210446232108e-09,
+      "relative_l2": 2.430556692550033e-07
+    },
+    "valid_logits": {
+      "max_abs": 2.980232238769531e-07,
+      "mean_abs": 6.777986527595203e-08,
+      "relative_l2": 1.554370575169896e-07
+    }
+  },
+  "schema_version": 1,
+  "source_revision": "1ca6ccf793be877c4b09550ee339d8673d18b9ee",
+  "test": "glm53_reduced_hybrid_cpu_parity",
+  "versions": {
+    "jax": "0.11.0",
+    "numpy": "2.5.2",
+    "torch": "2.13.0+cu130",
+    "transformers": "5.16.1"
+  }
+}
