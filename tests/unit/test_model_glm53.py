@@ -206,6 +206,15 @@ def test_safetensors_shard_header_plans_exact_http_ranges():
     with pytest.raises(ValueError, match="incomplete"):
         SafetensorsShardHeader.from_prefix(prefix[:-1])
 
+    gapped = json.dumps(
+        {
+            "weight": {"dtype": "F8_E4M3", "shape": [4, 6], "data_offsets": [1, 25]},
+            "weight_scale_inv": {"dtype": "F32", "shape": [2, 2], "data_offsets": [25, 41]},
+        }
+    ).encode()
+    with pytest.raises(ValueError, match="not contiguous"):
+        SafetensorsShardHeader.from_prefix(len(gapped).to_bytes(8, "little") + gapped)
+
 
 def test_block_fp8_dequant_and_tiled_linear_match_dense_reference():
     block_shape = (2, 3)
@@ -262,7 +271,9 @@ def test_block_fp8_validation_fails_closed():
 
 def test_bfloat16_expansion_fails_v4_32_before_activations():
     assert OFFICIAL_CHECKPOINT.logical_parameter_count == 321_323_031_390
-    assert OFFICIAL_CHECKPOINT.expanded_parameter_bytes("bfloat16") == 642_646_653_816
+    assert dict(OFFICIAL_CHECKPOINT.serialized_element_counts_by_dtype)["F32"] == 19_484_766
+    assert OFFICIAL_CHECKPOINT.scale_metadata_elements == 19_189_248
+    assert OFFICIAL_CHECKPOINT.expanded_parameter_bytes("bfloat16") == 642_723_410_808
     assert OFFICIAL_CHECKPOINT.expanded_parameter_bytes("bfloat16") > 16 * 32 * GIB
 
     plan = v4_32_lora_preflight(
@@ -283,7 +294,24 @@ def test_fp8_preflight_distinguishes_byte_fit_from_execution_evidence():
     assert not unproven.runnable
     assert unproven.adapter_parameter_count == 20_578_304
     assert unproven.free_per_device_bytes > 0
-    assert len(unproven.blockers) == 2
+    assert len(unproven.blockers) == 3
+
+    g4_proven = v4_32_lora_preflight(
+        config,
+        index,
+        rank=8,
+        executable_kernel_proven=True,
+        direct_loader_proven=True,
+        placed_base_per_device_bytes=20_234_287_352,
+        staging_per_host_bytes=79_298_560,
+    )
+    assert g4_proven.static_fit
+    assert not g4_proven.runnable
+    assert g4_proven.memory[0].per_device_bytes == 20_234_287_352
+    assert g4_proven.staging_per_host_bytes == 79_298_560
+    assert g4_proven.blockers == (
+        "the complete frozen text model has not passed a measured sharded TPU forward",
+    )
 
     proven = v4_32_lora_preflight(
         config,
@@ -291,6 +319,9 @@ def test_fp8_preflight_distinguishes_byte_fit_from_execution_evidence():
         rank=8,
         executable_kernel_proven=True,
         direct_loader_proven=True,
+        full_model_forward_proven=True,
+        placed_base_per_device_bytes=20_234_287_352,
+        staging_per_host_bytes=79_298_560,
     )
     assert proven.static_fit
     assert proven.runnable

@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
 from jaxsft.models.glm5_3_flash import (
     GIB,
@@ -23,6 +24,23 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _load_unique_json(path: Path, *, label: str) -> tuple[dict[str, Any], bytes]:
+    payload_bytes = path.read_bytes()
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key {key!r} in {label}")
+            result[key] = value
+        return result
+
+    payload = json.loads(payload_bytes, object_pairs_hook=unique_object)
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} must be a JSON object")
+    return payload, payload_bytes
 
 
 def _with_gib_fields(plan: dict) -> dict:
@@ -45,18 +63,7 @@ def _with_gib_fields(plan: dict) -> dict:
 def validate_kernel_evidence(path: Path) -> dict:
     """Validate tracked G3 evidence rather than accepting a boolean override."""
 
-    payload_bytes = path.read_bytes()
-    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-        result: dict[str, object] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError(f"duplicate JSON key {key!r} in kernel evidence")
-            result[key] = value
-        return result
-
-    payload = json.loads(payload_bytes, object_pairs_hook=unique_object)
-    if not isinstance(payload, dict):
-        raise ValueError("kernel evidence must be a JSON object")
+    payload, payload_bytes = _load_unique_json(path, label="kernel evidence")
     mismatches: list[str] = []
 
     def require(condition: bool, message: str) -> None:
@@ -145,6 +152,161 @@ def validate_kernel_evidence(path: Path) -> dict:
     }
 
 
+def validate_loader_evidence(path: Path) -> dict:
+    """Validate tracked G4 evidence and its separately committed header audit."""
+
+    payload, payload_bytes = _load_unique_json(path, label="loader evidence")
+    mismatches: list[str] = []
+
+    def require(condition: bool, message: str) -> None:
+        if not condition:
+            mismatches.append(message)
+
+    source_revision = payload.get("source_revision")
+    require(payload.get("schema_version") == 1, "schema_version must be 1")
+    require(
+        payload.get("test") == "glm53_g4_direct_sharded_loader_acceptance",
+        "unexpected evidence test identity",
+    )
+    require(
+        isinstance(source_revision, str)
+        and len(source_revision) == 40
+        and all(character in "0123456789abcdef" for character in source_revision),
+        "source_revision must be a full lowercase Git hash",
+    )
+
+    header = payload.get("header_audit", {})
+    header_file = header.get("file")
+    require(
+        isinstance(header_file, str) and Path(header_file).name == header_file,
+        "header audit reference must be a sibling basename",
+    )
+    header_path = path.parent / header_file if isinstance(header_file, str) else path
+    header_payload: dict[str, Any] = {}
+    header_bytes = b""
+    if header_path != path and header_path.is_file():
+        header_payload, header_bytes = _load_unique_json(header_path, label="checkpoint header audit")
+    else:
+        mismatches.append("referenced checkpoint header audit is missing")
+    require(
+        bool(header_bytes) and hashlib.sha256(header_bytes).hexdigest() == header.get("sha256"),
+        "checkpoint header audit SHA-256 mismatch",
+    )
+    require(header.get("tensor_count") == 76_108, "header tensor count mismatch")
+    require(header.get("shard_count") == 62, "header shard count mismatch")
+    require(header.get("header_network_bytes") == 10_684_096, "header range-read byte count mismatch")
+    require(header.get("fp8_weight_scale_pairs") == 37_338, "FP8 weight/scale pair count mismatch")
+
+    require(
+        header_payload.get("test") == "glm53_all_shard_header_and_placement_audit",
+        "unexpected checkpoint header audit identity",
+    )
+    require(
+        header_payload.get("source_revision") == source_revision,
+        "checkpoint header audit source revision mismatch",
+    )
+    header_model = header_payload.get("model", {})
+    require(header_model.get("repo_id") == OFFICIAL_CHECKPOINT.repo_id, "header model repo mismatch")
+    require(header_model.get("revision") == OFFICIAL_CHECKPOINT.revision, "header model revision mismatch")
+    require(
+        header_model.get("index_sha256") == OFFICIAL_CHECKPOINT.index_sha256,
+        "header index SHA-256 mismatch",
+    )
+    require(
+        header_model.get("payload_bytes") == OFFICIAL_CHECKPOINT.total_size_bytes,
+        "header payload byte count mismatch",
+    )
+    require(
+        header_model.get("element_counts_by_dtype")
+        == dict(OFFICIAL_CHECKPOINT.serialized_element_counts_by_dtype),
+        "header dtype element counts mismatch",
+    )
+    require(
+        header_payload.get("header_audit", {}).get("all_index_tensors_covered_once") is True,
+        "header/index coverage is incomplete",
+    )
+    require(
+        header_payload.get("fp8_pair_audit", {}).get(
+            "all_fp8_weights_have_exact_f32_scale_grids"
+        )
+        is True,
+        "header FP8 scale pairing is incomplete",
+    )
+
+    placement = payload.get("placement_plan", {})
+    require(
+        placement.get("estimated_text_base_bytes_per_device") == 20_234_287_352,
+        "text base placement byte count mismatch",
+    )
+    require(
+        placement.get("maximum_single_device_range_bytes") == 79_298_560,
+        "maximum host staging range mismatch",
+    )
+    require(
+        placement.get("estimated_streamed_payload_bytes_per_host") == 80_128_653_560,
+        "per-host streamed payload byte count mismatch",
+    )
+    require(placement.get("unsupported_tensor_count") == 0, "placement contains unsupported tensors")
+
+    sample = payload.get("sample_loader", {})
+    require(sample.get("process_count") == 4, "loader process count mismatch")
+    require(sample.get("global_device_count") == 16, "loader device count mismatch")
+    require(sample.get("device_range_count") == 16, "loader device-range count mismatch")
+    require(
+        sample.get("global_fingerprint_uint32") == [1_028_930_362, 72, 2_258_651_919, 1_881_823_194],
+        "loader global TPU fingerprint mismatch",
+    )
+    require(
+        sample.get("weight_full_sha256")
+        == "d79be6a957e1c23680665a68e4bbc9ffaf71a01bb7dc540e40140c6af9a3b3bc",
+        "loader source weight SHA-256 mismatch",
+    )
+    require(
+        sample.get("scale_sha256")
+        == "165bb5ed26c4a904ba915d5bd22657560e019041ccb0f13868ddd811e3c429dd",
+        "loader scale SHA-256 mismatch",
+    )
+    require(
+        sample.get("weight_payload_bytes_downloaded_across_hosts") == 6_291_456,
+        "loader did not download the weight payload exactly once across hosts",
+    )
+    require(sample.get("largest_http_range_bytes") == 393_216, "loader HTTP range bound mismatch")
+    require(
+        isinstance(sample.get("maximum_process_vmhwm_bytes"), int)
+        and 0 < sample["maximum_process_vmhwm_bytes"] <= 6 * GIB,
+        "loader process high-water memory exceeds 6 GiB",
+    )
+    require(
+        isinstance(sample.get("maximum_shm_used_delta_bytes"), int)
+        and 0 <= sample["maximum_shm_used_delta_bytes"] <= 1024**2,
+        "loader /dev/shm delta exceeds 1 MiB",
+    )
+    for claim in (
+        "device_ranges_cover_source_exactly_once",
+        "no_full_weight_replica_on_host_or_device",
+        "all_global_fingerprints_equal",
+        "all_distributed_shutdowns_complete",
+    ):
+        require(sample.get(claim) is True, f"loader claim {claim} is not true")
+    gate = payload.get("gate", {})
+    require(gate.get("g4_direct_loader") == "passed", "G4 is not marked passed")
+    require(gate.get("full_model_runnable") is False, "G4 evidence must not claim a runnable full model")
+    if mismatches:
+        raise ValueError("invalid GLM-5.3 loader evidence: " + "; ".join(mismatches))
+    return {
+        "path": str(path),
+        "sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        "source_revision": source_revision,
+        "test": payload["test"],
+        "header_audit": {
+            "path": str(header_path),
+            "sha256": hashlib.sha256(header_bytes).hexdigest(),
+        },
+        "placed_base_per_device_bytes": placement["estimated_text_base_bytes_per_device"],
+        "staging_per_host_bytes": placement["maximum_single_device_range_bytes"],
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True, help="pinned config.json")
@@ -160,6 +322,11 @@ def main() -> int:
         type=Path,
         help="tracked G3 JSON evidence; validated fail-closed before marking the kernel proven",
     )
+    parser.add_argument(
+        "--loader-evidence",
+        type=Path,
+        help="tracked G4 JSON evidence; validated with its sibling header audit",
+    )
     args = parser.parse_args()
 
     config_hash = _sha256(args.config)
@@ -171,12 +338,18 @@ def main() -> int:
     index = SafetensorsIndex.from_path(args.index)
     index.verify(OFFICIAL_CHECKPOINT)
     kernel_evidence = validate_kernel_evidence(args.kernel_evidence) if args.kernel_evidence else None
+    loader_evidence = validate_loader_evidence(args.loader_evidence) if args.loader_evidence else None
     plan = v4_32_lora_preflight(
         config,
         index,
         rank=args.rank,
         execution_weight_format=args.execution_weight_format,
         executable_kernel_proven=kernel_evidence is not None,
+        direct_loader_proven=loader_evidence is not None,
+        placed_base_per_device_bytes=(
+            loader_evidence["placed_base_per_device_bytes"] if loader_evidence else None
+        ),
+        staging_per_host_bytes=loader_evidence["staging_per_host_bytes"] if loader_evidence else None,
     )
     payload = {
         "schema_version": 1,
@@ -192,10 +365,10 @@ def main() -> int:
             "source_shard_count": index.shard_count,
         },
         "preflight": _with_gib_fields(plan.to_dict()),
-        "evidence": {"kernel": kernel_evidence, "direct_loader": None},
+        "evidence": {"kernel": kernel_evidence, "direct_loader": loader_evidence},
         "warning": (
-            "G3 proves one real block-FP8 contraction, not the full model; runnable remains false "
-            "until the direct-to-final-shard loader and whole-model HBM gates pass"
+            "G3/G4 evidence proves one real block-FP8 contraction and bounded direct sharding, not the "
+            "full model; runnable remains false until the whole-model forward/HBM gate passes"
         ),
     }
     print(json.dumps(payload, indent=2, sort_keys=True))

@@ -51,10 +51,26 @@ class CheckpointContract:
     shard_count: int
     parameter_counts_by_dtype: tuple[tuple[str, int], ...]
     maximum_source_shard_bytes: int
+    scale_metadata_elements: int = 0
 
     @property
     def logical_parameter_count(self) -> int:
         return sum(count for _, count in self.parameter_counts_by_dtype)
+
+    @property
+    def serialized_element_counts_by_dtype(self) -> tuple[tuple[str, int], ...]:
+        """Tensor elements in safetensors, including non-parameter scale grids."""
+
+        result: list[tuple[str, int]] = []
+        found_f32 = False
+        for dtype, count in self.parameter_counts_by_dtype:
+            if dtype == "F32":
+                count += self.scale_metadata_elements
+                found_f32 = True
+            result.append((dtype, count))
+        if self.scale_metadata_elements and not found_f32:
+            result.append(("F32", self.scale_metadata_elements))
+        return tuple(result)
 
     def expanded_parameter_bytes(self, dtype: str) -> int:
         """Return resident bytes after expanding floating checkpoint tensors.
@@ -67,10 +83,11 @@ class CheckpointContract:
         if dtype != "bfloat16":
             raise ValueError("only bfloat16 expansion is defined for the pinned checkpoint")
         widths = {"F8_E4M3": 2, "BF16": 2, "F32": 4}
-        unknown = {name for name, _ in self.parameter_counts_by_dtype} - set(widths)
+        serialized_counts = self.serialized_element_counts_by_dtype
+        unknown = {name for name, _ in serialized_counts} - set(widths)
         if unknown:
             raise ValueError(f"no expansion rule for checkpoint dtypes: {sorted(unknown)}")
-        return sum(widths[name] * count for name, count in self.parameter_counts_by_dtype)
+        return sum(widths[name] * count for name, count in serialized_counts)
 
 
 OFFICIAL_CHECKPOINT = CheckpointContract(
@@ -90,6 +107,9 @@ OFFICIAL_CHECKPOINT = CheckpointContract(
     # the final shard as 1.3 GB.  Use a decimal 5.5 GB ceiling until the
     # header-only manifest records exact Content-Length values.
     maximum_source_shard_bytes=5_500_000_000,
+    # F32 block scale grids are serialized tensors but not logical model
+    # parameters.  The remaining 295,518 F32 elements above are parameters.
+    scale_metadata_elements=19_189_248,
 )
 
 
@@ -299,11 +319,14 @@ class SafetensorsShardHeader:
             )
 
         tensors.sort(key=lambda tensor: (tensor.relative_start, tensor.name))
-        for previous, current in zip(tensors, tensors[1:], strict=False):
-            if current.relative_start < previous.relative_end:
+        expected_start = 0
+        for tensor in tensors:
+            if tensor.relative_start != expected_start:
                 raise ValueError(
-                    f"overlapping safetensors tensors {previous.name!r} and {current.name!r}"
+                    f"safetensors payload is not contiguous before {tensor.name!r}: "
+                    f"offset {tensor.relative_start}, expected {expected_start}"
                 )
+            expected_start = tensor.relative_end
         return cls(header_length=header_length, tensors=tuple(tensors))
 
     def tensor(self, name: str) -> SafetensorsTensorRange:
@@ -1851,6 +1874,7 @@ class V432LoRAPreflight:
     static_fit: bool
     executable_kernel_proven: bool
     direct_loader_proven: bool
+    full_model_forward_proven: bool
     runnable: bool
     blockers: tuple[str, ...]
 
@@ -1885,6 +1909,9 @@ def v4_32_lora_preflight(
     adapter_state_bytes_per_parameter: int = 12,
     executable_kernel_proven: bool = False,
     direct_loader_proven: bool = False,
+    full_model_forward_proven: bool = False,
+    placed_base_per_device_bytes: int | None = None,
+    staging_per_host_bytes: int | None = None,
 ) -> V432LoRAPreflight:
     """Build a fail-closed memory/evidence plan for attention-only LoRA."""
 
@@ -1896,13 +1923,29 @@ def v4_32_lora_preflight(
         raise ValueError("adapter_shards must be a positive divisor of devices")
     if hbm_per_device_bytes <= 0 or adapter_state_bytes_per_parameter <= 0:
         raise ValueError("memory sizes must be positive")
+    if placed_base_per_device_bytes is not None and placed_base_per_device_bytes <= 0:
+        raise ValueError("placed_base_per_device_bytes must be positive when supplied")
+    if staging_per_host_bytes is not None and staging_per_host_bytes <= 0:
+        raise ValueError("staging_per_host_bytes must be positive when supplied")
     if execution_weight_format == "fp8_blockwise":
-        base_bytes = index.total_size_bytes
-        base_assumption = (
-            "checkpoint-sized lower bound; requires scale-aware tiled dequantization without a persistent BF16 copy"
-        )
+        if placed_base_per_device_bytes is None:
+            base_bytes = index.total_size_bytes
+            base_per_device_bytes = math.ceil(base_bytes / model_shards)
+            base_assumption = (
+                "whole-checkpoint lower bound divided over model shards; requires scale-aware tiled "
+                "dequantization without a persistent BF16 copy"
+            )
+        else:
+            base_per_device_bytes = placed_base_per_device_bytes
+            base_bytes = base_per_device_bytes * devices
+            base_assumption = (
+                "header-audited text-only final placement, including replicated small tensors and FP32 scales"
+            )
     elif execution_weight_format == "bfloat16":
+        if placed_base_per_device_bytes is not None:
+            raise ValueError("a block-FP8 placement override cannot be used for bfloat16 execution")
         base_bytes = OFFICIAL_CHECKPOINT.expanded_parameter_bytes("bfloat16")
+        base_per_device_bytes = math.ceil(base_bytes / model_shards)
         base_assumption = "all floating checkpoint tensors expanded to BF16; F32 scale tensors remain F32"
     else:
         raise ValueError("execution_weight_format must be fp8_blockwise or bfloat16")
@@ -1913,7 +1956,7 @@ def v4_32_lora_preflight(
         MemoryLine(
             "frozen_base_weights",
             base_bytes,
-            math.ceil(base_bytes / model_shards),
+            base_per_device_bytes,
             base_assumption,
         ),
         MemoryLine(
@@ -1948,6 +1991,8 @@ def v4_32_lora_preflight(
         blockers.append("block-FP8 storage/dequantization has not been compiled and memory-profiled on TPU v4")
     if not direct_loader_proven:
         blockers.append("direct-to-final-shard loading has not passed a four-host checksum/peak-RSS test")
+    if not full_model_forward_proven:
+        blockers.append("the complete frozen text model has not passed a measured sharded TPU forward")
     runnable = static_fit and execution_weight_format == "fp8_blockwise" and not blockers
     return V432LoRAPreflight(
         execution_weight_format=execution_weight_format,
@@ -1956,10 +2001,15 @@ def v4_32_lora_preflight(
         hbm_per_device_bytes=hbm_per_device_bytes,
         adapter_parameter_count=adapter_count,
         memory=memory,
-        staging_per_host_bytes=OFFICIAL_CHECKPOINT.maximum_source_shard_bytes,
+        staging_per_host_bytes=(
+            OFFICIAL_CHECKPOINT.maximum_source_shard_bytes
+            if staging_per_host_bytes is None
+            else staging_per_host_bytes
+        ),
         static_fit=static_fit,
         executable_kernel_proven=executable_kernel_proven,
         direct_loader_proven=direct_loader_proven,
+        full_model_forward_proven=full_model_forward_proven,
         runnable=runnable,
         blockers=tuple(blockers),
     )
