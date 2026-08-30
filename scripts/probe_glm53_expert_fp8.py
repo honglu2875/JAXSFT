@@ -110,8 +110,12 @@ def _shape_mentions(hlo: str) -> dict[str, int]:
     shapes = {
         "full_gate_up_expert_bank": (EXPERTS, MOE_SIZE, HIDDEN_SIZE),
         "full_down_expert_bank": (EXPERTS, HIDDEN_SIZE, MOE_SIZE),
+        "local_gate_up_expert_bank": (EXPERTS, MOE_SIZE // 16, HIDDEN_SIZE),
+        "local_down_expert_bank": (EXPERTS, HIDDEN_SIZE // 16, MOE_SIZE),
         "selected_gate_up_dense": (1, TOP_K, MOE_SIZE, HIDDEN_SIZE),
         "selected_down_dense": (TOP_K, 1, HIDDEN_SIZE, MOE_SIZE),
+        "local_selected_gate_up_dense": (1, TOP_K, MOE_SIZE // 16, HIDDEN_SIZE),
+        "local_selected_down_dense": (TOP_K, 1, HIDDEN_SIZE // 16, MOE_SIZE),
     }
     result: dict[str, int] = {}
     for name, shape in shapes.items():
