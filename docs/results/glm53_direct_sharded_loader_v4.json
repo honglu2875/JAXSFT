@@ -1,0 +1,108 @@
+{
+  "gate": {
+    "full_model_runnable": false,
+    "g4_direct_loader": "passed",
+    "remaining_blockers": [
+      "The full frozen text checkpoint has not been range-loaded into one model PyTree.",
+      "The sharded block-FP8 contraction has not been integrated through every architecture path.",
+      "Whole-model HBM, compilation time, and forward numerics remain unmeasured."
+    ]
+  },
+  "header_audit": {
+    "file": "glm53_checkpoint_header_audit.json",
+    "fp8_weight_scale_pairs": 37338,
+    "header_network_bytes": 10684096,
+    "scope": {
+      "mtp_excluded": {
+        "names_sha256": "874444bc4d86c49d1b8839d73571dc6c5dc2de26e69d38ed4d261900df34cd26",
+        "payload_bytes": 7493399168,
+        "tensor_count": 1760
+      },
+      "text": {
+        "names_sha256": "ff7647d1a659c8747d224d66aea3b318fce097e3c970156a4fc5619923402d0a",
+        "payload_bytes": 319706118392,
+        "tensor_count": 74001
+      },
+      "unknown_tensor_count": 0,
+      "vision_excluded": {
+        "names_sha256": "109b5e07b78cd47a91fbe2d33b1ef7b16a2172dd23187f48560675749bf2ec34",
+        "payload_bytes": 1127254016,
+        "tensor_count": 347
+      }
+    },
+    "sha256": "8d6ad6b5b7e4371b36b79f432bb3d884eaee67901e26bc4be3f8ddb87e6bf6e3",
+    "shard_count": 62,
+    "tensor_count": 76108
+  },
+  "placement_plan": {
+    "counts_by_policy": {
+      "axis0_model_16": 36737,
+      "replicated_scale_metadata": 36467,
+      "replicated_small": 797
+    },
+    "estimated_streamed_payload_bytes_per_host": 80128653560,
+    "estimated_text_base_bytes_per_device": 20234287352,
+    "large_tensor_policy": "contiguous source axis 0 -> PartitionSpec('model', ...)",
+    "maximum_single_device_range_bytes": 79298560,
+    "maximum_single_device_range_tensor": {
+      "device_range_bytes": 79298560,
+      "dtype": "BF16",
+      "name": "lm_head.weight",
+      "policy": "axis0_model_16",
+      "shape": [
+        154880,
+        4096
+      ],
+      "source_bytes": 1268776960
+    },
+    "mesh_axis": "model",
+    "mesh_size": 16,
+    "per_device_bytes_by_policy": {
+      "axis0_model_16": 19964788736,
+      "replicated_scale_metadata": 74956800,
+      "replicated_small": 194541816
+    },
+    "scale_policy": "replicate small F32 block metadata",
+    "small_tensor_replication_limit_bytes": 1048576,
+    "source_payload_bytes_by_policy": {
+      "axis0_model_16": 319436619776,
+      "replicated_scale_metadata": 74956800,
+      "replicated_small": 194541816
+    },
+    "unsupported_tensor_count": 0
+  },
+  "rank_result_sha256": [
+    "dcfbd3918a478c21761d00c64d9007b2a2031d9a5b2d975e2f0104665a623b11",
+    "b1d6a2fdad7ecd5605db35e5018bf5a0960524e49014a909adf7ac143f673bba",
+    "a7f2a325028f54b17d0b6e232505760cfce2ab96f90d3a8584f2117144241dc2",
+    "fa305d975eea2babfc6ec2d2423539c7a63b346cad8a0d9a877ef62552205cb2"
+  ],
+  "sample_loader": {
+    "all_distributed_shutdowns_complete": true,
+    "all_global_fingerprints_equal": true,
+    "device_range_count": 16,
+    "device_range_sha256_manifest": "e77b4d25fc79209899d9b761cc6a86bb7a115c0b09839ad31f96b25a87a29a6a",
+    "device_ranges_cover_source_exactly_once": true,
+    "global_device_count": 16,
+    "global_fingerprint_uint32": [
+      1028930362,
+      72,
+      2258651919,
+      1881823194
+    ],
+    "largest_http_range_bytes": 393216,
+    "maximum_process_vmhwm_bytes": 4807086080,
+    "maximum_shm_used_delta_bytes": 0,
+    "no_full_weight_replica_on_host_or_device": true,
+    "process_count": 4,
+    "scale_sha256": "165bb5ed26c4a904ba915d5bd22657560e019041ccb0f13868ddd811e3c429dd",
+    "tensor": "model.language_model.layers.3.self_attn.q_a_proj.weight",
+    "total_network_bytes_across_hosts": 7008800,
+    "weight_bytes": 6291456,
+    "weight_full_sha256": "d79be6a957e1c23680665a68e4bbc9ffaf71a01bb7dc540e40140c6af9a3b3bc",
+    "weight_payload_bytes_downloaded_across_hosts": 6291456
+  },
+  "schema_version": 1,
+  "source_revision": "fb08fcc48ea32b91b5ac33ac2628f5bb828ce7d5",
+  "test": "glm53_g4_direct_sharded_loader_acceptance"
+}

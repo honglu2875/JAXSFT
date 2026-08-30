@@ -19,8 +19,10 @@ Pinned metadata:
 | Logical parameters | 321,323,031,390 |
 | E4M3 parameters | 314,396,639,232 |
 | BF16 parameters | 6,926,096,640 |
-| F32 parameters | 295,518 |
-| Safetensors payload metadata | 328,326,771,576 bytes (305.778 GiB) |
+| Logical F32 parameters | 295,518 |
+| F32 block-scale metadata | 19,189,248 elements |
+| Serialized F32 elements | 19,484,766 |
+| Safetensors payload | 328,326,771,576 bytes (305.778 GiB) |
 | Safetensors tensors / files | 76,108 / 62 |
 | `config.json` SHA-256 | `bb8f01c42cb92a52ca72e65afb4d5bd8d11aef083cd210e8de25dfb904f23e9f` |
 | index SHA-256 | `3c3f40366a53c3fd7974b4eab7881a365a98c2a4329150befebab99fe7c18b05` |
@@ -32,19 +34,20 @@ E4M3 with 128x128 scales, while a large explicit allowlist remains BF16/F32.
 
 ## Why aggregate capacity is not a feasibility result
 
-A v4-32 has 16 chips with nominal 32 GiB HBM each. Ideal 16-way placement of
-the serialized checkpoint is 19.111 GiB per chip, leaving 12.889 GiB before
-adapters, activations, executable/runtime state, collectives, and temporary
-dequantization buffers. Expanding the floating tensors to BF16 requires
-642,646,653,816 bytes (598.511 GiB) before any training state, so a persistent
-BF16 copy is rejected.
+A v4-32 has 16 chips with nominal 32 GiB HBM each. Naively dividing the entire
+serialized multimodal checkpoint gives 19.111 GiB per chip. The G4 header
+audit provides a more precise text-only placement: 20,234,287,352 bytes
+(18.845 GiB) per chip, including replicated small tensors and FP32 scale
+grids. Expanding the floating tensors to BF16 requires 642,723,410,808 bytes
+(598.583 GiB) before any training state, so a persistent BF16 copy is rejected.
 
 TPU v4 does not make the checkpoint's FP8 serialization directly executable by
 assumption. The G3 probe now demonstrates one real 1536x4096 block-FP8
 contraction with scale-aware 128x128 conversion and no full BF16/F32 weight in
 optimized HLO. This is kernel evidence, not a whole-model capacity result. The
-plan may mark `executable_kernel_proven: true`, but remains `runnable: false`
-until direct final-shard loading and full-model HBM measurements pass.
+plan may mark `executable_kernel_proven: true`. The G4 proof now marks
+`direct_loader_proven: true`, but the plan remains `runnable: false` until the
+complete frozen model passes a sharded forward with measured HBM.
 
 The source files are serialization shards, not mesh/FSDP shards. Assigning one
 file to one host is therefore incorrect: a final tensor partition can require
@@ -55,9 +58,12 @@ slices from most source files. The loader must either:
 3. perform a bounded one-file-at-a-time read per host, accepting duplicated
    network traffic as an initial correctness baseline.
 
-The initial staging bound is one source file (conservatively 5.5 GB) per host,
-not the entire 76.4 GiB ideal quarter-checkpoint. Header-only range reads have
-already been validated and are roughly 90--175 KiB for sampled shards.
+The audited staging bound is one final device slice at a time, not one source
+file and not the entire ideal quarter-checkpoint. The largest planned range is
+the 79,298,560-byte BF16 LM-head slice. Loading every text tensor would stream
+80,128,653,560 bytes (74.626 GiB) per host under the initial policy; large
+payloads are downloaded once across the slice, while small replicated tensors
+and scale grids are intentionally read by each host.
 
 ## Initial adapter surface
 
@@ -87,9 +93,9 @@ Current branch status:
 | G1 generic LoRA correctness | passed | commit `2ebff99`; separate adapter tree and merge/gradient tests |
 | G2 reduced architecture parity | passed | commit `1ca6ccf`; [`glm53_reduced_hybrid_cpu_parity.json`](../results/glm53_reduced_hybrid_cpu_parity.json) |
 | G3 block-FP8 primitive on v4 | passed | commit `2bfda04`; [`glm53_fp8_v4_probe.json`](../results/glm53_fp8_v4_probe.json) |
-| G4 direct sharded loader | pending | no four-host checksum/RSS evidence yet |
-| G5 full frozen forward | pending | blocked by G3/G4 |
-| G6 bounded LoRA SFT | pending | blocked by G3--G5 |
+| G4 direct sharded loader | passed | commit `fb08fcc`; [`glm53_direct_sharded_loader_v4.json`](../results/glm53_direct_sharded_loader_v4.json), [`glm53_checkpoint_header_audit.json`](../results/glm53_checkpoint_header_audit.json) |
+| G5 full frozen forward | pending | next gate; whole-model path/HBM unproven |
+| G6 bounded LoRA SFT | pending | blocked by G5 |
 
 ### G0 — Metadata and static preflight
 
@@ -106,11 +112,14 @@ PYTHONPATH=src uv run python scripts/plan_glm53_lora.py \
   --config /path/to/config.json \
   --index /path/to/model.safetensors.index.json \
   --kernel-evidence docs/results/glm53_fp8_v4_probe.json \
+  --loader-evidence docs/results/glm53_direct_sharded_loader_v4.json \
   --rank 8
 ```
 
-Expected result at this gate: `static_fit: true`, `runnable: false` for
-`fp8_blockwise`; `static_fit: false` for `bfloat16`.
+Expected result after G4: `static_fit: true`, `runnable: false` for
+`fp8_blockwise`, with 28.859 GiB provisionally used and 3.141 GiB free per
+chip. The sole evidence blocker is the unmeasured full frozen forward.
+`bfloat16` remains `static_fit: false`.
 
 ### G1 — Generic LoRA correctness
 
@@ -157,6 +166,21 @@ full-size BF16/F32/FP8 weight in optimized HLO. This passes G3 only.
 - On four hosts, verify local/global checksums, peak RSS, `/dev/shm` high-water
   mark, bytes downloaded, and that no full host or device replica exists.
 
+Measured result: range-reading all 62 headers transferred 10,684,096 bytes and
+proved exact coverage of 76,108 tensors. The explicit text scope contains
+74,001 tensors; 1,760 MTP and 347 vision tensors are excluded by named rules.
+Every one of 37,338 FP8 matrices has an exact F32 128x128 scale grid, and all
+text tensors have a bounded 16-way placement.
+
+For the four-host device proof, each local TPU received four contiguous
+393,216-byte source ranges directly into final `NamedSharding`. The 16 ranges
+cover the real 6,291,456-byte `q_a_proj` exactly once, and all processes
+produced the same global fingerprint. Total network traffic was 7,008,800
+bytes including four small header/scale reads; maximum process HWM was 4.477
+GiB and the measured `/dev/shm` delta was zero. This passes bounded ordinary
+RAM staging and direct device placement. It does not claim explicit host-page
+pinning or a whole-model load.
+
 ### G5 — Full frozen forward and HBM measurement
 
 - Load the text-only base without adapters and execute short-sequence forward
@@ -191,5 +215,7 @@ Stop before downloading the full checkpoint if any of these remains true:
   leaves.
 
 Passing G0 is permission to investigate G1/G2, not permission to fetch 305.8
-GiB of weights. Passing G3 and the loader dry run is the first point at which a
-bounded real-weight download becomes justified.
+GiB of weights. G3 and G4 now justify a bounded G5 load, but not an unbounded
+download or a training run. G5 must materialize the text-only PyTree one range
+at a time, stop on memory pressure, and demonstrate a complete frozen forward
+before G6 allocates adapter optimizer state.
