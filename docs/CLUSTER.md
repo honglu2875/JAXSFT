@@ -13,13 +13,43 @@ measure those facts before a training profile is accepted.
 
 The original four targets were unreachable and were then pre-empted. A
 replacement single-host TPU VM was supplied explicitly and tested, but it does
-not substitute for the four-process acceptance gate. A future local profile
-must contain four resolvable SSH targets plus a coordinator address reachable
-from every worker.
+not substitute for the four-process acceptance gate.
 
 The checked-in example is [configs/clusters/four-host-tpu.example.toml](../configs/clusters/four-host-tpu.example.toml).
 Operative inventory such as hostnames, IP addresses, and credentials belongs in
 an ignored `*.local.toml` profile and is not published with the source capsule.
+
+### Measured four-host v4-32 acceptance, 2026-08-30
+
+A later supplied slice passed the previously open gate. Read-only probes found
+four unique SSH targets, worker numbers zero through three, 400 GiB host RAM on
+each VM, accelerator type v4-32, and enough RAM-backed cache space. The
+controller then proved four JAX processes, four local devices per process, and
+16 global devices. Runtime process ranks did not follow hostname-suffix order,
+which confirms why all data, artifact, and checkpoint identity comes from
+`jax.process_index()`.
+
+The acceptance sequence completed:
+
+- a three-step synthetic topology and collective smoke;
+- an interrupted step-two checkpoint, fresh four-process restore, and step
+  three whose semantic model/optimizer hash exactly matched an uninterrupted
+  reference;
+- three real materialized-UltraChat updates of OLMo 2 1B; and
+- three real materialized-UltraChat updates of Qwen3.5 0.8B.
+
+Both real runs observed four distinct rank-local first-batch hashes, exact
+agreement for every globally reduced metric, zero emitted zero-objective
+samples, and clean distributed shutdown on all ranks. Pinned inputs were fully
+staged before TPU ownership and the training processes ran with Hub access
+disabled. Exact hostname-free metrics and hashes are in
+[the v4-32 acceptance record](results/v4_32_multihost_acceptance.json).
+
+The VM image enables `systemd-logind` `RemoveIPC`, which can recursively remove
+user-owned `/dev/shm` content when a short SSH session ends. The implemented
+layout therefore keeps immutable run metadata and checkpoints on persistent
+storage. A dedicated RAM cache is unsealed and resealed within one SSH session,
+ending root-owned and group-writable so logout cleanup does not claim it.
 
 ### Measured single-host v4-8 smoke, 2026-08-29
 
@@ -101,8 +131,8 @@ hosts = [
 coordinator_host = "worker-0.example.internal"
 coordinator_port = 12355
 
-remote_workspace_root = "/dev/shm/jaxsft-runs"
-remote_cache_root = "/dev/shm/jaxsft-cache"
+remote_workspace_root = "/var/tmp/jaxsft-runs"
+remote_cache_root = "/dev/shm/.jaxsft-cache"
 local_artifact_root = "artifacts/cluster"
 
 [ssh]
@@ -164,8 +194,13 @@ that a later edit mutates a running job.
   cache path when needed, then sync the frozen environment without changing
   host-wide packages. An incompatible controller/worker binary fails before
   launch rather than falling back to system package mutation.
-- Support an explicit offline mode that ships the interpreter/`uv` cache and
-  required Hub artifacts; “frozen” alone is not assumed offline.
+- Key the reusable dependency environment by the exact `uv.lock` SHA-256.
+- Materialize the pinned model snapshot and non-streaming dataset on every host
+  before launch, record their resolved identities in `staging.json`, then set
+  `HF_HUB_OFFLINE=1` and `HF_DATASETS_OFFLINE=1` for TPU execution.
+- If the cache root is below `/dev/shm`, require passwordless `sudo` only for
+  the dedicated ownership-sealing operation. Persistent cache roots use normal
+  user ownership and do not require `sudo`.
 - Never use `--delete` outside the exact run directory. Cache cleanup is a
   separate dry-run-first command.
 
@@ -226,7 +261,8 @@ known-hosts file and currently reports:
 - whether configured work/cache/artifact paths are local, shared, and writable;
 - outbound Hub/object-store reachability without displaying credentials;
 - clock skew sufficient to explain logs (not used for run identity);
-- A deeper multi-process collective/checkpoint doctor remains an M3 gate.
+- Multi-process collective/checkpoint behavior is covered by the explicit
+  synthetic acceptance run rather than inferred from the metadata probe.
 
 Any expected topology recorded in a cluster profile is an assertion checked
 against these measurements.
@@ -246,32 +282,35 @@ Prepared data is deterministically sharded by global process identity. A host
 must never substitute a different dataset because a cache is missing. Staging
 and verification happen before measured training.
 
-The initial smoke profile uses `/dev/shm` only after the controller audit showed
-ample capacity on the current TPU VM shape. It is disposable hot storage, not
-the eventual durable checkpoint backend.
+The validated profile uses `/dev/shm` only after the controller audit shows
+ample capacity on the current TPU VM shape. It is disposable hot storage for
+reconstructable caches, never the checkpoint backend. A root-owned dedicated
+cache survives per-session `RemoveIPC` cleanup, but not VM pre-emption.
 
 ## 7. Checkpoint storage
 
-Portable multi-host checkpoint semantics remain an M3 blocker. The schema-v3
-baseline supports one JAX process, including multiple local devices, and
-explicitly rejects checkpoint/resume when `jax.process_count() > 1`. It writes
-parameters, AdamW state, step, RNG cursor, data cursor, exact source identity,
-and backend/device topology to a temporary file, promotes it atomically, then
-writes a SHA-256 completion marker. Restore checks the marker, hash, resolved
-recipe, source, topology, synthetic shape or tokenizer identity, and cursor
-before loading trusted local pickle state. The production multi-host contract
-requires one of:
+Schema v4 implements strict restart for the current replicated data-parallel
+topology. Every runtime rank removes its local pmap replica axis, computes a
+container-independent SHA-256 over parameters and AdamW state, gathers that
+identity across processes, and refuses the write unless all four semantic
+states match. Each rank atomically writes its own payload and adjacent
+completion marker under a common step directory. Payloads also contain the
+rank-local deterministic data cursor, step/RNG cursor, exact source and recipe
+identities, and exact runtime topology.
 
-1. a shared filesystem/object-store backend supported by the chosen checkpoint
-   implementation;
-2. coordinated host-local shard staging followed by verified collection into a
-   complete portable checkpoint;
-3. single-host gathering only for small smoke states, never as the assumed path
-   for large models.
+Resume always targets a new immutable run. The controller passes the common
+step directory, and each process chooses the file named for its actual
+`jax.process_index()`. Before trusted local pickle state is opened, the loader
+checks the marker and file SHA-256; afterward it checks marker/payload agreement,
+recomputes the semantic state hash, and validates optimizer, RNG, and data
+cursors. The four-host cold-resume proof is recorded in
+[ADR 0002](adr/0002-replicated-multihost-checkpoints.md).
 
-The selected path must survive a cold restore on all four hosts. A checkpoint
-written only to one worker's local disk is not called complete unless the model
-state was intentionally gathered there and validated. Hugging Face iterable
+This is intentionally not called a topology-portable sharded checkpoint. It
+duplicates the replicated model/optimizer state in each rank file and requires
+the same process count, local-device topology, source, and recipe on restore.
+Model-axis partitioning needs a successor format with global-array metadata,
+shard manifests, coordinated commit, and resharding tests. Hugging Face iterable
 resume currently replays the pinned rank-local epoch prefix, which is exact but
 linear in consumed rows; a captured shuffle-buffer cursor is the scaling path.
 
@@ -306,4 +345,5 @@ Before loading a real model:
 7. start a fresh four-host process set, restore, and perform the next update;
 8. collect and verify every artifact hash from the controller.
 
-Only then should a Qwen checkpoint or instruction dataset be staged.
+This sequence passed on the measured v4-32 before the real OLMo 2 and Qwen3.5
+runs were staged. Future topology or checkpoint-backend changes must repeat it.

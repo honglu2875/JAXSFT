@@ -266,16 +266,23 @@ supports it. A partial checkpoint is visible for diagnosis but never selected
 by automatic resume. Multi-host storage semantics must be proven by save,
 collection, cold restore, and one continued update.
 
-The implemented schema-v3 baseline is intentionally narrower than this target
-contract. For one JAX process (including several local devices), it stores
-parameters, AdamW moments/step, the fully resolved recipe identity, exact source
-identity, backend/device topology, deterministic RNG cursor, and either a
-shape-checked synthetic batch cursor or pinned Hugging Face iterable replay
-cursor with tokenizer hash. A SHA-256 completion marker is written last and
-checked before a trusted local pickle is opened. The current model has no
-dropout, so the RNG record is an explicit derivation cursor rather than
-serialized device PRNG state. Multi-process checkpointing fails closed until a
-portable shard/storage format is implemented.
+The implemented schema-v4 baseline is intentionally narrower than the eventual
+model-axis target. In replicated training, every process stores one unreplicated
+local copy of parameters and AdamW moments/step plus its rank-local data cursor.
+Before writing, all processes must agree on a container-independent semantic
+SHA-256 of model and optimizer state. Each rank payload records the fully
+resolved recipe identity, exact source identity, backend/device topology,
+runtime rank, deterministic RNG cursor, and either a shape-checked synthetic
+batch cursor or pinned Hugging Face iterable replay cursor with tokenizer hash.
+A payload SHA-256 completion marker is written last and checked before a
+trusted local pickle is opened; the semantic state hash is recomputed after
+loading. The current models have no dropout, so the RNG record is an explicit
+derivation cursor rather than serialized device PRNG state.
+
+This format has passed a cold four-process restore and exact next-update state
+comparison on v4-32. It requires the same replicated topology and deliberately
+does not claim model-axis shard portability or resharding. See
+[ADR 0002](adr/0002-replicated-multihost-checkpoints.md).
 
 ## 9. Extension strategy
 

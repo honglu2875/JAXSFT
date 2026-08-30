@@ -1,6 +1,6 @@
 # JAXSFT implementation plan
 
-## Current implementation status — 2026-08-29
+## Current implementation status — 2026-08-30
 
 The repository spine and first executable vertical slice now exist. Completed:
 
@@ -19,7 +19,10 @@ The repository spine and first executable vertical slice now exist. Completed:
   pinned plain-conversation template, full Hugging Face training-step parity,
   and public-checkpoint all-logit parity;
 - pinned `Qwen/Qwen3.5-0.8B-Base` and UltraChat 200k smoke recipe;
-- a single-host v4-8 smoke using one JAX process and four local TPU devices.
+- a single-host v4-8 smoke using one JAX process and four local TPU devices;
+- a four-host v4-32 path using four JAX processes/16 devices, protected
+  RAM-cache staging, rank-disjoint input evidence, schema-v4 replicated
+  checkpoints, and real OLMo 2/Qwen3.5 UltraChat SFT smokes.
 
 The Qwen renderer/tokenizer and tiny PyTorch valid-logit/loss/gradient/optimizer
 parity gates pass. The pinned public checkpoint's 320 text tensors load with an
@@ -33,10 +36,15 @@ replayed UltraChat steps 3–5 matched the uninterrupted reference exactly. The
 loss-aware recipe then emitted 20 samples from 22 rows with no zero-objective
 truncation drops, compared with 28 rows and six drops for the right-truncation
 smoke. All 19 truncated emitted samples retained the configured 32-token
-context budget. The original four-host slice was pre-empted, so multi-host
-startup and portable checkpointing remain open. Packing, high-performance
-chunkwise DeltaNet, model-axis sharding, and Kimi remain planned work rather
-than advertised support.
+context budget. A later four-host v4-32 initialized four processes/16 devices,
+proved four distinct rank-local first batches and exact global metric agreement,
+then completed three real Qwen3.5 UltraChat updates. A synthetic step-two
+checkpoint cold-resumed on all four hosts and produced the same step-three
+model/optimizer state hash and metrics as an uninterrupted reference. This
+closes the replicated multi-host startup/restart gate; topology-portable
+model-axis checkpoints remain open. Packing, high-performance chunkwise
+DeltaNet, model-axis sharding, and Kimi remain planned work rather than
+advertised support.
 
 The next model-breadth gate is also complete: pinned
 `allenai/OLMo-2-0425-1B` loaded all 179 tensors (1,484,916,736 parameters), and
@@ -46,6 +54,14 @@ full-parameter updates on a v4-8 with finite metrics. A tiny OLMo interrupted
 run cold-resumed to a byte-identical final checkpoint. OLMo's pinned template
 does not represent tools or reasoning, so those samples fail explicitly rather
 than losing metadata.
+
+The same OLMo checkpoint then completed three real updates on the four-host
+v4-32. Loss moved from 1.93071 to 1.64470, first-batch identities were unique by
+runtime rank, global metrics matched exactly, and all four workers shut down
+cleanly. Qwen3.5 followed on the same staged UltraChat snapshot and moved from
+loss 1.86463 to 1.62334 in three updates with the same rank and lifecycle gates.
+The hostname-free record is
+`docs/results/v4_32_multihost_acceptance.json`.
 
 The next data/objective gate is complete as well. `semantic_loss_aware` chooses
 only complete-message windows, validates unique call/result links, keeps each
@@ -71,8 +87,9 @@ Accelerate, PyTorch cross-entropy/AdamW, and the stock cosine scheduler. Against
 the same tape, BF16 TPU relative loss error stayed bounded (5.61% early-half
 mean, 5.28% late-half mean, 4.05% final), while an env-controlled FP32 JAX lane
 reduced maximum relative error to 0.0214%. Both current TPU lanes request global
-and explicit highest contraction precision. This is a 20-step stability gate,
-not evidence for full-run convergence or four-host equivalence.
+and explicit highest contraction precision. This is a 20-step single-host
+numerical stability gate, not evidence for full-run convergence or a four-host
+batch-identical trajectory comparison.
 
 ## 1. Outcome
 
@@ -238,12 +255,17 @@ Exit gate:
 
 ### M3 — Four-host slice path
 
+Status: the replicated data-parallel baseline and exit gate passed on a
+four-host v4-32 on 2026-08-30. Model-axis partitioning remains a separate gate
+for checkpoints that cannot use full replication.
+
 Deliverables:
 
 - `jaxsft cluster doctor|sync|run|status|stop|collect` with `--dry-run`.
 - Immutable per-run source capsules and run-specific remote workspaces.
-- Data-parallel mesh first, then model-axis partitioning required by the target
-  checkpoint; host-local input sharding based on `jax.process_index()`.
+- Data-parallel mesh with host-local input sharding based on
+  `jax.process_index()`; add model-axis partitioning when required by a target
+  checkpoint.
 - Rank-specific logs, global metric reductions, failure propagation, exact-job
   teardown, and periodic artifact salvage.
 - Real-slice smoke and checkpoint-restore test on all four nodes.
@@ -276,9 +298,10 @@ Exit gate:
 ### M5 — Model breadth
 
 Status: the first item, OLMo 2 dense, has passed tiny parity, pinned public
-checkpoint load/forward parity, shared-trainer SFT, 20-step full-model
-BF16/FP32 trajectory comparison against a stock CPU oracle, and tiny checkpoint
-resume on a measured single-host v4-8. Remaining items stay gated.
+checkpoint load/forward parity, shared-trainer SFT on single- and four-host TPU
+topologies, a 20-step full-model BF16/FP32 trajectory comparison against a
+stock CPU oracle, and tiny checkpoint resume on measured v4-8 and v4-32
+topologies. Remaining items stay gated.
 
 Deliverables, one gated model at a time:
 
@@ -380,29 +403,30 @@ default CPU gate flaky.
 | Streaming shuffle cannot resume exactly. | The baseline pins revisions/dependencies and replays the rank-local epoch prefix from recorded counters; test exact interruption and retain buffer-state checkpointing as the scalable follow-up. |
 | Full PyTorch and JAX copies exceed host memory. | Use lazy safetensors conversion and preflight memory estimates; keep Torch construction in tiny parity tests. |
 | Large Kimi/GLM/Qwen MoE models do not fit the measured slice. | Separate architecture parity from full-checkpoint training support and publish explicit feasibility status. |
-| Multi-host checkpoint files land on non-shared local disks. | Make storage explicit; run save/collect/restore in M0; refuse long runs if restore is unproven. |
+| Multi-host checkpoint files land on non-shared local disks. | Keep run/checkpoint roots persistent, write one verified file per runtime rank, collect every host, and repeat the cold-restore acceptance test after topology/backend changes. |
 | Dirty research code is not reproducible. | Build and hash a source capsule containing HEAD, patch, and selected untracked files for every run. |
 | One failed SSH session leaves accelerator workers alive. | Use run-specific PID files, signal escalation, bounded retries only for transport errors, and exact-job status checks. |
 | Model-specific exceptions leak into generic code. | Keep capability declarations and exceptions in the model file; forbid imports from one model module into another. |
 
-## 8. Decisions needed before implementation
+## 8. Recorded decisions and remaining choices
 
 1. **Exact target names.** No official Hugging Face result matched the literal
    “Kimi 3.5 Flash” on 2026-08-29. Plausible intended targets include Kimi-K3,
    Kimi-K2.5/K2.6, Qwen3.5, GLM-4.7-Flash, or GLM-5.3-Flash.
-2. **Measured multi-host topology.** A single v4-8 is measured as one process
-   with four local devices. Confirm accelerator generation, per-host device
-   counts, aggregate HBM, and coordinator reachability on the next four-host
-   slice.
-3. **Checkpoint/artifact storage.** Choose a shared mount/object store or approve
-   collection of host-local shards after the M0 restore spike.
+2. **Measured multi-host topology — resolved for the baseline.** The accepted
+   slice is v4-32: four processes, four local devices each, and 16 devices
+   globally. Runtime rank is independent of hostname suffix.
+3. **Checkpoint/artifact storage — resolved for replicated runs.** Persistent
+   host-local run roots hold one schema-v4 file per runtime rank and collection
+   retrieves all hosts. A future model-axis format may still select shared or
+   object storage.
 4. **First optimization target.** Choose full-parameter SFT first (recommended
    for a correctness reference) or require LoRA in the first usable milestone.
 5. **Base checkpoints.** SFT recipes should normally start from base models;
    instruct checkpoints may still be used for tokenizer/template and parity
    fixtures.
-6. **Framework layer.** Select pure JAX PyTrees or the current stable Flax API
-   only after the M0 implementation spike; avoid designing a home-grown module
-   system by accident.
-7. **Publication choices.** Confirm JAXSFT, Apache-2.0, remote namespace, and
-   whether the concrete cluster hostname example belongs in the public tree.
+6. **Framework layer — resolved.** The readable reference uses pure JAX PyTrees;
+   architecture-specific behavior stays in one model file.
+7. **Publication choices — resolved.** The project is JAXSFT under Apache-2.0;
+   the public tree contains placeholder inventory and hostname-free evidence,
+   while concrete cluster profiles remain ignored.

@@ -384,12 +384,45 @@ def _remote_uv_probe_command(remote_uv: PurePosixPath, digest: str) -> str:
     )
 
 
-def _remote_uv_upload_command(host: str, remote_uv: PurePosixPath, digest: str) -> str:
+def _remote_cache_unseal_command(cache: PurePosixPath) -> str:
+    quoted = shlex.quote(str(cache))
+    return (
+        'owner="$(id -u)"; group="$(id -g)"; '
+        "command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1 || "
+        "{ echo 'passwordless sudo is required to protect the RAM cache' >&2; exit 48; }; "
+        f"if test -d {quoted}; then sudo -n chown -R \"$owner:$group\" -- {quoted}; "
+        f"else sudo -n install -d -o \"$owner\" -g \"$group\" -m 0775 {quoted}; fi"
+    )
+
+
+def _remote_cache_seal_command(cache: PurePosixPath) -> str:
+    quoted = shlex.quote(str(cache))
+    return (
+        'group="$(id -g)"; '
+        f"sudo -n chown -R root:\"$group\" -- {quoted} && "
+        f"sudo -n chmod -R g+rwX -- {quoted}"
+    )
+
+
+def _cache_needs_logout_protection(cache: PurePosixPath) -> bool:
+    """Return whether logind may remove this per-user RAM-cache tree."""
+
+    return cache.is_relative_to(PurePosixPath("/dev/shm"))
+
+
+def _remote_uv_upload_command(
+    host: str,
+    remote_uv: PurePosixPath,
+    digest: str,
+    cache: PurePosixPath | None = None,
+) -> str:
     safe_host = re.sub(r"[^A-Za-z0-9_.-]", "_", host)
     temporary = remote_uv.with_name(remote_uv.name + f".tmp-{safe_host}")
     parent = remote_uv.parent
+    unseal = "" if cache is None else _remote_cache_unseal_command(cache) + "; "
+    seal = "" if cache is None else f"trap {shlex.quote(_remote_cache_seal_command(cache))} EXIT; "
     return (
-        f"set -eu; umask 077; mkdir -p {shlex.quote(str(parent))}; "
+        f"set -eu; {unseal}{seal}umask 077; mkdir -p {shlex.quote(str(parent))}; "
         f"test ! -e {shlex.quote(str(temporary))}; "
         f"cat > {shlex.quote(str(temporary))}; "
         f"test \"$(sha256sum {shlex.quote(str(temporary))} | cut -d' ' -f1)\" = {shlex.quote(digest)}; "
@@ -440,7 +473,8 @@ def run_remote(profile: ClusterProfile, args: argparse.Namespace) -> int:
     recipe = _recipe_relative(args.recipe)
     remote_run = PurePosixPath(state.remote_run_dir)
     source = remote_run / "source"
-    venv = remote_run / "venv"
+    lock_digest = hashlib.sha256((ROOT / "uv.lock").read_bytes()).hexdigest()
+    venv = profile.remote_cache_root / "venvs" / f"uv-lock-{lock_digest[:16]}"
     artifacts = remote_run / "artifacts"
     temporary_root = remote_run / "tmp"
     tpu_log_root = remote_run / "tpu-logs"
@@ -448,9 +482,29 @@ def run_remote(profile: ClusterProfile, args: argparse.Namespace) -> int:
     # sharing the dedicated cache root avoids downloading the same pinned inputs
     # for every immutable run directory.
     cache = profile.remote_cache_root
+    protect_cache = _cache_needs_logout_protection(cache)
     batch_tape = _remote_batch_tape_path(profile, getattr(args, "batch_tape", None))
     if getattr(args, "synthetic", False) and batch_tape is not None:
         raise ClusterError("--synthetic and --batch-tape are mutually exclusive")
+    stop_after_step = getattr(args, "stop_after_step", None)
+    if stop_after_step is not None and stop_after_step <= 0:
+        raise ClusterError("--stop-after-step must be positive")
+    resume_run_id = getattr(args, "resume_run_id", None)
+    resume_step = getattr(args, "resume_step", None)
+    if (resume_run_id is None) != (resume_step is None):
+        raise ClusterError("--resume-run-id and --resume-step must be provided together")
+    resume_checkpoint = None
+    if resume_run_id is not None:
+        resume_run_id = validate_run_id(resume_run_id)
+        if resume_run_id == state.run_id:
+            raise ClusterError("resume source run must differ from the new immutable run")
+        if resume_step <= 0:
+            raise ClusterError("--resume-step must be positive")
+        previous_artifacts = profile.remote_workspace_root / resume_run_id / "artifacts" / "checkpoints"
+        if len(profile.hosts) == 1:
+            resume_checkpoint = previous_artifacts / f"step-{resume_step:08d}.pkl"
+        else:
+            resume_checkpoint = previous_artifacts / f"step-{resume_step:08d}"
     local_uv, uv_digest, uv_payload = _local_uv_binary()
     remote_uv = cache / "bin" / f"uv-{uv_digest[:16]}"
     env = {
@@ -461,18 +515,55 @@ def run_remote(profile: ClusterProfile, args: argparse.Namespace) -> int:
         "UV_PROJECT_ENVIRONMENT": str(venv),
     }
     env_text = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
-    tape_check = (
-        ""
-        if batch_tape is None
-        else f"test -d {shlex.quote(str(batch_tape))} && "
-        f"test -f {shlex.quote(str(batch_tape / 'manifest.json'))}; "
-    )
-    prepare = (
-        f"set -eu; mkdir -p {shlex.quote(str(cache))} {shlex.quote(str(artifacts))} "
+    input_checks = []
+    if batch_tape is not None:
+        input_checks.extend(
+            (
+                f"test -d {shlex.quote(str(batch_tape))}",
+                f"test -f {shlex.quote(str(batch_tape / 'manifest.json'))}",
+            )
+        )
+    if resume_checkpoint is not None:
+        input_checks.append(
+            f"test -d {shlex.quote(str(resume_checkpoint))}"
+            if len(profile.hosts) > 1
+            else f"test -f {shlex.quote(str(resume_checkpoint))}"
+        )
+    input_check_text = "" if not input_checks else " && ".join(input_checks) + "; "
+    prepare_body = (
+        f"mkdir -p {shlex.quote(str(artifacts))} "
         f"{shlex.quote(str(temporary_root))} {shlex.quote(str(tpu_log_root))}; "
-        f"{tape_check}"
-        f"cd {shlex.quote(str(source))}; env {env_text} {shlex.quote(str(remote_uv))} sync --frozen --no-dev"
+        f"{input_check_text}"
+        f"cd {shlex.quote(str(source))}; "
+        f"test \"$(sha256sum uv.lock | cut -d' ' -f1)\" = {shlex.quote(lock_digest)}; "
+        f"env {env_text} {shlex.quote(str(remote_uv))} sync --frozen --no-dev --no-install-project"
     )
+    if not getattr(args, "synthetic", False):
+        stage_env = {
+            **env,
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPATH": str(source / "src"),
+        }
+        stage_env_text = " ".join(f"{key}={shlex.quote(value)}" for key, value in stage_env.items())
+        stage_arguments = [
+            str(venv / "bin" / "python"),
+            str(source / "scripts" / "stage_recipe.py"),
+            "--config",
+            str(source / recipe),
+        ]
+        if batch_tape is not None:
+            stage_arguments.append("--skip-data")
+        prepare_body += (
+            f"; env {stage_env_text} {shlex.join(stage_arguments)} "
+            f"> {shlex.quote(str(remote_run / 'staging.json'))}"
+        )
+    if protect_cache:
+        prepare = (
+            f"set -eu; {_remote_cache_unseal_command(cache)}; "
+            f"trap {shlex.quote(_remote_cache_seal_command(cache))} EXIT; {prepare_body}"
+        )
+    else:
+        prepare = f"set -eu; mkdir -p {shlex.quote(str(cache))}; {prepare_body}"
     coordinator = f"{profile.coordinator_host}:{profile.coordinator_port}"
 
     def launch_command(rank: int) -> str:
@@ -480,12 +571,16 @@ def run_remote(profile: ClusterProfile, args: argparse.Namespace) -> int:
         log_file = remote_run / f"rank-{rank:03d}.log"
         run_env = {
             **env,
+            "HF_DATASETS_OFFLINE": "1",
+            "HF_HUB_OFFLINE": "1",
             "JAXSFT_COORDINATOR_ADDRESS": coordinator,
             "JAXSFT_PROCESS_COUNT": str(len(profile.hosts)),
             "JAXSFT_PROCESS_ID": str(rank),
             "JAXSFT_SOURCE_SHA256": state.source_sha256,
             "JAXSFT_OUTPUT_DIR": str(artifacts),
             "JAX_PLATFORMS": "tpu",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPATH": str(source / "src"),
             "PYTHONUNBUFFERED": "1",
             "TEST_TMPDIR": str(temporary_root),
             "TPU_LOG_DIR": str(tpu_log_root),
@@ -509,6 +604,10 @@ def run_remote(profile: ClusterProfile, args: argparse.Namespace) -> int:
             )
         if batch_tape is not None:
             extra_arguments.extend(("--batch-tape", str(batch_tape)))
+        if resume_checkpoint is not None:
+            extra_arguments.extend(("--resume", str(resume_checkpoint)))
+        if stop_after_step is not None:
+            extra_arguments.extend(("--stop-after-step", str(stop_after_step)))
         extra_text = "" if not extra_arguments else " " + shlex.join(extra_arguments)
         return (
             f"set -eu; test ! -e {shlex.quote(str(pid_file))}; "
@@ -533,7 +632,7 @@ def run_remote(profile: ClusterProfile, args: argparse.Namespace) -> int:
         return _ssh(
             profile,
             host,
-            _remote_uv_upload_command(host, remote_uv, uv_digest),
+            _remote_uv_upload_command(host, remote_uv, uv_digest, cache if protect_cache else None),
             input_bytes=uv_payload,
             timeout=180,
         )
@@ -654,6 +753,7 @@ def collect(profile: ClusterProfile, args: argparse.Namespace) -> int:
             "--include=rank-*.log",
             "--include=rank-*.pid",
             "--include=SOURCE_SHA256",
+            "--include=staging.json",
             "--include=artifacts/***",
             "--exclude=*",
             "-e",
@@ -695,6 +795,9 @@ def parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="set the recorded JAXSFT_FORCE_FP32 numerical control lane",
             )
+            command.add_argument("--stop-after-step", type=int, help="stop at this absolute step and checkpoint")
+            command.add_argument("--resume-run-id", help="previous immutable run holding rank-local checkpoints")
+            command.add_argument("--resume-step", type=int, help="completed step to restore from --resume-run-id")
         elif name == "stop":
             command.add_argument("--grace-seconds", type=int, default=15)
         command.set_defaults(function=function)

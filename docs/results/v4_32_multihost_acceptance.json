@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "date_utc": "2026-08-30",
+  "purpose": "hostname-free four-host replicated SFT, rank-local input, and cold-resume acceptance evidence",
+  "topology": {
+    "accelerator_type": "v4-32",
+    "process_count": 4,
+    "local_device_count": 4,
+    "global_device_count": 16,
+    "parameter_placement": "replicated data parallel",
+    "runtime_rank_source": "jax.process_index()"
+  },
+  "software": {
+    "python": "3.12.13",
+    "jax": "0.11.0",
+    "jaxlib": "0.11.0",
+    "datasets": "4.8.5",
+    "huggingface_hub": "1.29.0",
+    "tokenizers": "0.23.1"
+  },
+  "staging": {
+    "mode": "materialized before TPU ownership, then HF_HUB_OFFLINE=1 and HF_DATASETS_OFFLINE=1",
+    "dataset": {
+      "repo_id": "HuggingFaceH4/ultrachat_200k",
+      "revision": "8049631c405ae6576f93f445c6b8166f76f5505a",
+      "config": "default",
+      "split": "train_sft",
+      "rows": 207865,
+      "fingerprint": "e7b9e5b01c39be4b"
+    }
+  },
+  "checkpoint_acceptance": {
+    "source_capsule_sha256": "151b00e9eed68b2dec3badd62358dfcd99107461a4685124446975cf96d82af6",
+    "checkpoint_schema_version": 4,
+    "interrupted_after_step": 2,
+    "rank_files": 4,
+    "step_2_replicated_state_sha256": "dacbbf51c7165583938aa4ac0b1a96fe1ac36f0a0f5b747d99bd36e27a4eeb59",
+    "cold_resume_start_step": 2,
+    "cold_resume_completed_step": 3,
+    "resumed_step_3_replicated_state_sha256": "4ae7f2ec4023763036a0f6809873779add20de9750116fbe43ab681c9d5ceab1",
+    "uninterrupted_step_3_replicated_state_sha256": "4ae7f2ec4023763036a0f6809873779add20de9750116fbe43ab681c9d5ceab1",
+    "step_3_metrics_equal": true,
+    "all_rank_state_hashes_equal_before_write": true,
+    "file_sha256_verified_before_unpickle": true,
+    "semantic_state_sha256_verified_after_unpickle": true,
+    "cold_distributed_shutdown_complete_on_all_ranks": true
+  },
+  "real_sft_runs": {
+    "source_capsule_sha256": "d806f0cf59a37899eeee527fd595da7ffbb2ac3d5931a3917ebbdd65ce375925",
+    "olmo2_1b": {
+      "model": {
+        "repo_id": "allenai/OLMo-2-0425-1B",
+        "revision": "a1847dff35000b4271fa70afc5db10fd29fedbdf",
+        "parameter_count": 1484916736,
+        "staged_bytes": 5949372397,
+        "staged_files": 9
+      },
+      "recipe_identity_sha256": "335d861c17a28528647833c448bd5c6d583ab64542d971a754d995bea608ddbc",
+      "tokenizer_identity_sha256": "6049ea77fe1039acf27aceed4664bdd4e22b9c223f87ec0aed6ffb0bcdea141a",
+      "first_batch_sha256_by_runtime_rank": [
+        "54abde4775d58c006363ede949b3e123210dc424c9d0204b4f3c390c0aff14a4",
+        "940158d190c0ee9665de4880a9967109b2f50f570816c63f30c50dcd919a441f",
+        "95067e8f814f804922e134efe81186e41198103ccbc5262632ff06d702e7c373",
+        "aae921ff0c8a3900de44dddb56065862824e165a370a43acc30b327cac70d5e6"
+      ],
+      "steps": [
+        {
+          "step": 1,
+          "loss": 1.9307115077972412,
+          "gradient_norm": 5.148349761962891,
+          "input_tokens": 3257,
+          "loss_denominator": 2603,
+          "rank_seconds_range": [54.44824259006418, 54.44876884180121]
+        },
+        {
+          "step": 2,
+          "loss": 1.8063453435897827,
+          "gradient_norm": 5.002002239227295,
+          "input_tokens": 3484,
+          "loss_denominator": 2687,
+          "rank_seconds_range": [0.14239363698288798, 0.23120371717959642]
+        },
+        {
+          "step": 3,
+          "loss": 1.6446964740753174,
+          "gradient_norm": 4.024748802185059,
+          "input_tokens": 2976,
+          "loss_denominator": 2360,
+          "selected_accuracy": 0.6046609878540039,
+          "rank_seconds_range": [0.14158682920970023, 0.18245170009322464]
+        }
+      ],
+      "rows_emitted_all_ranks": 48,
+      "zero_objective_samples": 0,
+      "all_global_metrics_equal_across_ranks": true,
+      "distributed_shutdown_complete_on_all_ranks": true
+    },
+    "qwen3_5_0_8b": {
+      "model": {
+        "repo_id": "Qwen/Qwen3.5-0.8B-Base",
+        "revision": "dc7cdfe2ee4154fa7e30f5b51ca41bfa40174e68",
+        "parameter_count": 752393024,
+        "staged_bytes": 1769896333,
+        "staged_files": 7
+      },
+      "recipe_identity_sha256": "f88ddb2c351b5cb1375dfe33f4f650900853fd6aa392f45de094395e6ad48995",
+      "tokenizer_identity_sha256": "cf91c5ac93285dac7f368384b62ace7aecfd169c490f52ec50c9a5482da76099",
+      "first_batch_sha256_by_runtime_rank": [
+        "1e2ce8b0c8ccaceac5f8e0a4a65ed2b4ff3cbedc9be6bf98ccf6fb5b27cd9883",
+        "26b363abd1f8ebd9d5916eb1fa1cff98044033ae07d88c27a3db89c8b42ab651",
+        "1e201addbffc6b4d8ac311639fbe721675d7075e702c9072b6759359c1f48e2a",
+        "658cf3173ba83395afbaab9fb0594aa51da35f56a1b4d64be9868304d6f7349d"
+      ],
+      "steps": [
+        {
+          "step": 1,
+          "loss": 1.8646302223205566,
+          "gradient_norm": 12.745357513427734,
+          "input_tokens": 3206,
+          "loss_denominator": 2499,
+          "rank_seconds_range": [97.71230998286046, 97.71335248998366]
+        },
+        {
+          "step": 2,
+          "loss": 1.5981334447860718,
+          "gradient_norm": 18.06710433959961,
+          "input_tokens": 3452,
+          "loss_denominator": 2463,
+          "rank_seconds_range": [0.42505592899397016, 0.518938209163025]
+        },
+        {
+          "step": 3,
+          "loss": 1.6233406066894531,
+          "gradient_norm": 12.0142183303833,
+          "input_tokens": 3184,
+          "loss_denominator": 2489,
+          "selected_accuracy": 0.6070711016654968,
+          "rank_seconds_range": [0.4242853100877255, 0.4688878608867526]
+        }
+      ],
+      "rows_emitted_all_ranks": 48,
+      "zero_objective_samples": 0,
+      "all_global_metrics_equal_across_ranks": true,
+      "distributed_shutdown_complete_on_all_ranks": true
+    }
+  },
+  "numerics": {
+    "effective_parameter_dtype": "bfloat16",
+    "optimizer_moment_dtype": "float32",
+    "jax_default_matmul_precision": "highest",
+    "explicit_dot_precision": "HIGHEST"
+  },
+  "limitations": [
+    "These are three-update correctness smokes, not convergence or throughput benchmarks.",
+    "Checkpoint acceptance covers replicated model/optimizer state and an identical four-process topology; model-axis-sharded topology-portable checkpoints remain unimplemented.",
+    "Rank checkpoint payloads are trusted local pickle files and must not be loaded from untrusted sources.",
+    "The readable Qwen3.5 recurrent scan is not yet a chunkwise production kernel."
+  ]
+}

@@ -44,16 +44,14 @@ in its checked-in recipe or renderer identity.
 - CPU tests, forced four-device CPU smoke, optional Transformers/PyTorch parity,
   and a frozen `uv.lock`.
 
-The validation gates pass for 75 offline unit tests; byte/token template parity;
-and tiny-model valid-logit/loss/gradient/AdamW-step parity against Transformers
-and PyTorch for both architectures. Qwen has an exact 320-tensor,
+The offline CPU suite, byte/token template fixtures, and tiny-model
+valid-logit/loss/gradient/AdamW-step parity against Transformers and PyTorch
+pass for both architectures. Qwen has an exact 320-tensor,
 752,393,024-parameter public-checkpoint audit. A measured single-host v4-8 run
 completed five live Qwen UltraChat updates across four TPU devices with finite
 loss and gradients. The first backward compile took about 101 seconds; a
 measured steady step took 0.403 seconds (2,538 input tokens/s). See the
-[sanitized result](docs/results/qwen35_v4_8_smoke.json). The original four-host
-slice was pre-empted, so multi-host initialization and checkpoint portability
-remain unproven.
+[sanitized result](docs/results/qwen35_v4_8_smoke.json).
 
 Checkpoint/resume was subsequently tested on the same v4-8. A synthetic
 interrupted run produced a byte-identical final checkpoint to its uninterrupted
@@ -77,6 +75,25 @@ the same v4-8 with finite metrics, and a tiny cold-resume checkpoint was
 byte-identical to an uninterrupted reference. See the
 [model card](docs/models/olmo2.md) and
 [sanitized result](docs/results/olmo2_1b_v4_8_smoke.json).
+
+A four-host v4-32 acceptance run on 2026-08-30 then initialized four JAX
+processes and 16 global TPU devices. Each runtime rank consumed a distinct
+first batch while every globally reduced metric matched exactly across ranks.
+The materialized, pinned UltraChat split drove three full-model updates for
+both architectures:
+
+- OLMo 2 1B moved from loss 1.93071 to 1.64470. Its first compiled update took
+  54.45 seconds; subsequent updates took 0.14–0.23 seconds per host.
+- Qwen3.5 0.8B moved from loss 1.86463 to 1.62334. Its first compiled update
+  took 97.71 seconds; subsequent updates took 0.42–0.52 seconds per host.
+
+Before either real-model launch, a synthetic run stopped at step two and wrote
+four schema-v4 rank-local checkpoints. A fresh four-process job restored the
+runtime-rank files and completed step three. Its model/optimizer state SHA-256
+exactly matched a same-source uninterrupted run. This proves restart for the
+current replicated data-parallel topology; it is not yet a model-axis-sharded
+portable checkpoint format. The hostname-free evidence is in the
+[v4-32 acceptance record](docs/results/v4_32_multihost_acceptance.json).
 
 The next data/objective gate adds `semantic_loss_aware`: candidate windows must
 align to complete messages, while linked tool-call/result/chained-call/final
@@ -156,26 +173,38 @@ resolvable names or IPs when necessary:
 cp configs/clusters/four-host-tpu.example.toml \
    configs/clusters/four-host-tpu.local.toml
 
-python3.12 cluster.py doctor \
+uv run --no-project --python 3.12 python cluster.py doctor \
   --profile configs/clusters/four-host-tpu.local.toml
-python3.12 cluster.py sync \
+uv run --no-project --python 3.12 python cluster.py sync \
   --profile configs/clusters/four-host-tpu.local.toml
-python3.12 cluster.py run \
+uv run --no-project --python 3.12 python cluster.py run \
   --profile configs/clusters/four-host-tpu.local.toml \
-  --recipe configs/recipes/qwen35_0_8b_ultrachat_loss_aware_smoke.yaml
-python3.12 cluster.py status \
+  --recipe configs/recipes/qwen35_0_8b_ultrachat_v4_32_smoke.yaml
+uv run --no-project --python 3.12 python cluster.py status \
   --profile configs/clusters/four-host-tpu.local.toml
 ```
 
 All workers install the frozen environment and cache Hub/JAX state under the
-profile's dedicated run/cache roots. A worker without `uv` receives the
-controller's exact executable at a SHA-addressed cache path; nothing is
+profile's dedicated roots. The public profile keeps run metadata/checkpoints
+on persistent storage and puts only reproducible large caches in `/dev/shm`.
+For RAM caches, passwordless `sudo` is used narrowly to seal the cache
+root-owned between SSH sessions; this prevents `systemd-logind` with
+`RemoveIPC=yes` from deleting it. Persistent cache paths do not require this
+workaround. Model and materialized-dataset revisions are staged first, then TPU
+workers launch with Hub and Datasets offline. A worker without `uv` receives
+the controller's exact executable at a SHA-addressed cache path; nothing is
 installed into system Python. Before launch, the controller refuses an active
 TPU owner and only removes an unowned, regular, zero-byte libtpu lockfile. The
 launcher never changes SSH keys, modifies host-wide packages, overwrites an
 existing run directory, or kills by process name. Add `--synthetic` to
 `cluster.py run` for a tiny architecture/topology smoke before resolving public
 weights.
+
+Multi-host interruption and resume use a new immutable destination run. Pass
+`--stop-after-step N` to create one checkpoint file per runtime rank, then pass
+the original `--resume-run-id` and `--resume-step N` when launching the fresh
+run. The controller gives every process the shared step directory; the worker
+selects its own `jax.process_index()` file.
 
 For numerical controls, `cluster.py run --force-fp32` sets the strictly parsed
 `JAXSFT_FORCE_FP32=1` override and records the recipe dtype, effective dtype,
@@ -200,6 +229,7 @@ tests/unit/                          offline CPU contracts
 tests/parity/                        Hugging Face numerical/token oracles
 scripts/run_hf_trajectory.py         independent stock Trainer CPU trajectory
 scripts/compare_trajectories.py      loss-error and widening/stability gate
+scripts/stage_recipe.py              pinned model/data preflight materialization
 docs/MODELS.md                       evidence-based compatibility table
 docs/                                architecture contracts, cards, results, roadmap
 ```
@@ -213,13 +243,14 @@ from token IDs. Every selected target token is aligned beside the token being
 predicted; global loss is `sum(weight * nll) / sum(weight)` across devices.
 
 The initial run deliberately uses a readable recurrent DeltaNet reference
-kernel and replicated parameters. Single-process checkpoints atomically capture
-the model, optimizer, step, RNG cursor, and a deterministically replayable data
-cursor; the loader verifies a completion marker, SHA-256, recipe identity, and
-exact source/topology identity before unpickling trusted local state. Chunkwise
-TPU kernels,
-model-axis sharding, packing, portable multi-host checkpoints, LoRA, Qwen MoE,
-and Kimi variants remain roadmap items. See [PLAN.md](PLAN.md) for their
+kernel and replicated parameters. Schema-v4 checkpoints atomically capture the
+model, optimizer, step, RNG cursor, and a deterministically replayable
+rank-local data cursor. Each process writes a rank file and completion marker;
+all ranks first prove an identical semantic model/optimizer hash. The loader
+verifies file and state SHA-256 values plus recipe, source, topology, rank, and
+cursor identities before unpickling trusted local state. Chunkwise TPU kernels,
+model-axis sharding and its portable sharded checkpoint format, packing, LoRA,
+Qwen MoE, and Kimi variants remain roadmap items. See [PLAN.md](PLAN.md) for their
 exit gates and [docs/DATA_CONTRACT.md](docs/DATA_CONTRACT.md) for the data/loss
 invariants.
 

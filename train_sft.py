@@ -27,7 +27,7 @@ from jaxsft.loss import causal_loss_statistics
 from jaxsft.optim import AdamWHyperparameters, AdamWState, adamw_init, adamw_update, cosine_learning_rate
 
 
-CHECKPOINT_SCHEMA_VERSION = 3
+CHECKPOINT_SCHEMA_VERSION = 4
 
 
 def _json_default(value: Any) -> Any:
@@ -181,6 +181,88 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def batch_sha256(batch: dict[str, Any]) -> str:
+    """Hash one rank-local batch without recording instruction contents."""
+
+    digest = hashlib.sha256(b"jaxsft-rank-local-batch-v1\0")
+    for key in sorted(batch):
+        array = np.asarray(batch[key])
+        if array.dtype.hasobject:
+            raise TypeError(f"batch field {key!r} has unsupported object dtype")
+        if not array.flags.c_contiguous:
+            array = np.ascontiguousarray(array)
+        metadata = json.dumps(
+            {"dtype": str(array.dtype), "key": key, "shape": list(array.shape)},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        digest.update(len(metadata).to_bytes(8, "big"))
+        digest.update(metadata)
+        digest.update(array.nbytes.to_bytes(8, "big"))
+        digest.update(memoryview(array).cast("B"))
+    return digest.hexdigest()
+
+
+def allgather_sha256(value: str) -> list[str]:
+    """Gather a small content identity in JAX runtime-rank order."""
+
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise ValueError("allgather_sha256 requires a lowercase SHA-256 digest")
+    if jax.process_count() == 1:
+        return [value]
+    from jax.experimental import multihost_utils
+
+    local_digest = np.frombuffer(bytes.fromhex(value), dtype=np.uint8)
+    gathered = np.asarray(multihost_utils.process_allgather(local_digest, tiled=False), dtype=np.uint8)
+    if gathered.size != 32 * jax.process_count():
+        raise RuntimeError(
+            f"SHA-256 collective returned shape {gathered.shape} for {jax.process_count()} processes"
+        )
+    return [bytes(row).hex() for row in gathered.reshape(jax.process_count(), 32)]
+
+
+def replicated_state_sha256(params: object, optimizer: object) -> str:
+    """Hash replicated train state independently of its checkpoint container."""
+
+    host_state = jax.device_get({"optimizer": optimizer, "params": params})
+    leaves, structure = jax.tree.flatten(host_state)
+    digest = hashlib.sha256(b"jaxsft-replicated-state-v1\0")
+    digest.update(str(structure).encode())
+    digest.update(b"\0")
+    for index, leaf in enumerate(leaves):
+        array = np.asarray(leaf)
+        if array.dtype.hasobject:
+            raise TypeError(f"replicated state leaf {index} has unsupported object dtype")
+        if not array.flags.c_contiguous:
+            array = np.ascontiguousarray(array)
+        metadata = json.dumps(
+            {
+                "dtype": str(array.dtype),
+                "dtype_str": array.dtype.str,
+                "index": index,
+                "shape": list(array.shape),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        digest.update(len(metadata).to_bytes(8, "big"))
+        digest.update(metadata)
+        digest.update(array.nbytes.to_bytes(8, "big"))
+        digest.update(memoryview(array).cast("B"))
+    return digest.hexdigest()
+
+
+def validate_replicated_state_across_processes(params: object, optimizer: object) -> str:
+    """Require every process to checkpoint the same replicated model/optimizer."""
+
+    state_hash = replicated_state_sha256(params, optimizer)
+    hashes = allgather_sha256(state_hash)
+    if len(set(hashes)) != 1:
+        prefixes = ", ".join(f"rank {index}={value[:16]}" for index, value in enumerate(hashes))
+        raise RuntimeError(f"model/optimizer replicas differ before checkpoint: {prefixes}")
+    return state_hash
+
+
 def save_checkpoint(
     output_dir: Path,
     step: int,
@@ -192,16 +274,30 @@ def save_checkpoint(
     topology: dict[str, Any],
     data_state: dict[str, Any],
     rng_state: dict[str, Any],
+    replicated_state_hash: str | None = None,
 ) -> Path:
-    """Atomically write a trusted, replicated smoke checkpoint and marker."""
+    """Atomically write one rank of a trusted replicated-state checkpoint."""
 
     if step <= 0:
         raise ValueError("checkpoint step must be positive")
-    if int(topology.get("process_count", -1)) != 1:
-        raise ValueError("replicated checkpoint format supports exactly one JAX process")
+    process_index = int(topology.get("process_index", -1))
+    process_count = int(topology.get("process_count", -1))
+    if process_count <= 0 or not 0 <= process_index < process_count:
+        raise ValueError("checkpoint topology has an invalid process index/count")
+    if replicated_state_hash is None:
+        replicated_state_hash = replicated_state_sha256(params, optimizer)
+    if len(replicated_state_hash) != 64 or any(
+        character not in "0123456789abcdef" for character in replicated_state_hash
+    ):
+        raise ValueError("replicated state hash must be a lowercase SHA-256 digest")
     checkpoint_dir = output_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    target = checkpoint_dir / f"step-{step:08d}.pkl"
+    if process_count == 1:
+        target = checkpoint_dir / f"step-{step:08d}.pkl"
+    else:
+        step_dir = checkpoint_dir / f"step-{step:08d}"
+        step_dir.mkdir(parents=True, exist_ok=True)
+        target = step_dir / f"rank-{process_index:03d}.pkl"
     marker_path = target.with_suffix(".complete.json")
     if target.exists() or marker_path.exists():
         raise FileExistsError(f"refusing to overwrite checkpoint or completion marker: {target}")
@@ -213,6 +309,7 @@ def save_checkpoint(
             "recipe_identity_hash": recipe_identity_hash,
             "source_identity": source_identity,
             "topology": topology,
+            "replicated_state_sha256": replicated_state_hash,
             "params": params,
             "optimizer": optimizer,
             "data_state": data_state,
@@ -238,6 +335,7 @@ def save_checkpoint(
             "recipe_identity_hash": recipe_identity_hash,
             "source_identity": source_identity,
             "topology": topology,
+            "replicated_state_sha256": replicated_state_hash,
         },
     )
     return target
@@ -269,6 +367,9 @@ def load_checkpoint(
         raise ValueError("checkpoint source identity differs from this run")
     if marker.get("topology") != topology:
         raise ValueError("checkpoint topology differs from this run")
+    marker_state_hash = marker.get("replicated_state_sha256")
+    if not isinstance(marker_state_hash, str) or len(marker_state_hash) != 64:
+        raise ValueError("checkpoint marker has an invalid replicated-state hash")
     # Pickle is intentionally limited to checkpoints created and trusted by the
     # same experiment. Never load an untrusted checkpoint path.
     with path.open("rb") as handle:
@@ -281,6 +382,8 @@ def load_checkpoint(
         raise ValueError("checkpoint payload source identity differs from this run")
     if payload.get("topology") != topology:
         raise ValueError("checkpoint payload topology differs from this run")
+    if payload.get("replicated_state_sha256") != marker_state_hash:
+        raise ValueError("checkpoint payload and marker replicated-state hashes differ")
     payload_step = int(payload.get("step", -1))
     if payload_step < 0:
         raise ValueError("checkpoint step must be non-negative")
@@ -289,7 +392,24 @@ def load_checkpoint(
     required = {"params", "optimizer", "data_state", "rng_state"}
     if not required.issubset(payload):
         raise ValueError(f"checkpoint is missing fields: {sorted(required - set(payload))}")
+    if replicated_state_sha256(payload["params"], payload["optimizer"]) != marker_state_hash:
+        raise ValueError("checkpoint replicated model/optimizer hash does not match its marker")
     return payload
+
+
+def resolve_checkpoint_path(path: str | Path, *, topology: dict[str, Any]) -> Path:
+    """Resolve a legacy single-process file or this process's rank file."""
+
+    path = Path(path).expanduser().resolve()
+    if path.is_file():
+        return path
+    if not path.is_dir():
+        raise FileNotFoundError(f"checkpoint path is neither a file nor a step directory: {path}")
+    process_index = int(topology.get("process_index", -1))
+    candidate = path / f"rank-{process_index:03d}.pkl"
+    if not candidate.is_file():
+        raise FileNotFoundError(f"checkpoint step directory has no file for process {process_index}: {candidate}")
+    return candidate
 
 
 def validate_optimizer_checkpoint(params: object, optimizer: object, *, expected_step: int) -> None:
@@ -323,6 +443,48 @@ def validate_rng_checkpoint(raw: object, *, seed: int, expected_step: int) -> No
         raise ValueError("checkpoint model initialization seed differs from this recipe")
     if int(raw.get("next_training_step", -1)) != expected_step:
         raise ValueError("checkpoint RNG cursor differs from checkpoint step")
+
+
+def replicate_pmap_tree(tree: object, devices: list[jax.Device]) -> object:
+    """Place one explicit copy of every state leaf on each local pmap device."""
+
+    if not devices:
+        raise ValueError("pmap replication requires at least one local device")
+    replicate = jax.pmap(
+        lambda _replica, value: value,
+        in_axes=(0, None),
+        out_axes=0,
+        devices=devices,
+    )
+    return replicate(np.arange(len(devices), dtype=np.int32), tree)
+
+
+def unreplicate_pmap_tree(tree: object, *, local_device_count: int) -> object:
+    """Select one rank-local replica for checkpointing replicated train state."""
+
+    if local_device_count <= 0:
+        raise ValueError("local_device_count must be positive")
+
+    def first_replica(value):
+        if value.ndim < 1 or value.shape[0] != local_device_count:
+            raise ValueError(
+                "pmap state leaf does not have the expected local replica axis: "
+                f"shape={value.shape}, local_device_count={local_device_count}"
+            )
+        return value[0]
+
+    return jax.tree.map(first_replica, tree)
+
+
+def replicated_metric_scalar(value: object, *, local_device_count: int, name: str) -> Any:
+    """Validate one pmap metric copy per local device and return its scalar."""
+
+    replicas = np.asarray(jax.device_get(value))
+    if replicas.shape != (local_device_count,):
+        raise ValueError(f"metric {name!r} has shape {replicas.shape}, expected {(local_device_count,)}")
+    if not np.all(replicas == replicas[0]):
+        raise ValueError(f"metric {name!r} differs across local replicas: {replicas.tolist()}")
+    return replicas[0].item()
 
 
 def load_synthetic_cursor(raw: object, *, expected_step: int, length: int, vocab_size: int) -> int:
@@ -454,18 +616,13 @@ def run(args: argparse.Namespace) -> int:
     }
     source_identity = checkpoint_source_identity(Path(__file__).resolve().parent)
 
-    checkpoint_requested = bool(recipe.training.checkpoint_every or args.resume or args.stop_after_step is not None)
-    if process_count > 1 and checkpoint_requested:
-        raise RuntimeError(
-            "checkpoint/resume currently supports one JAX process (including multiple local devices); "
-            "portable multi-host checkpoints are not implemented"
-        )
-
     restored = None
+    resume_path = None
     start_step = 0
     if args.resume:
+        resume_path = resolve_checkpoint_path(args.resume, topology=topology)
         restored = load_checkpoint(
-            args.resume,
+            resume_path,
             recipe_identity_hash=recipe.identity_hash,
             source_identity=source_identity,
             topology=topology,
@@ -604,8 +761,8 @@ def run(args: argparse.Namespace) -> int:
             "software": {"python": sys.version, "platform": platform.platform(), "packages": packages},
             "source": source_identity,
             "resume": None
-            if args.resume is None
-            else {"checkpoint": str(Path(args.resume).expanduser().resolve()), "start_step": start_step},
+            if resume_path is None
+            else {"checkpoint": str(resume_path), "start_step": start_step},
             "requested_stop_step": stop_step,
             "execution": {
                 "synthetic": args.synthetic,
@@ -705,24 +862,25 @@ def run(args: argparse.Namespace) -> int:
         weight_decay=recipe.training.weight_decay,
         max_grad_norm=recipe.training.max_grad_norm,
     )
+    local_devices = list(jax.local_devices())
     if restored is None:
-        # Build optimizer slots independently on every replica; out_axes=None states
-        # that the result is replicated rather than adding a fake leading axis.
-        initialize_optimizer = jax.pmap(
-            lambda _replica, model_params: adamw_init(model_params),
-            in_axes=(0, None),
-            out_axes=None,
-            axis_name="data",
-        )
-        optimizer = initialize_optimizer(np.arange(local_device_count, dtype=np.int32), params)
+        params = replicate_pmap_tree(params, local_devices)
+        initialize_optimizer = jax.pmap(adamw_init, in_axes=0, out_axes=0)
+        optimizer = initialize_optimizer(params)
     else:
-        optimizer = restored["optimizer"]
-        validate_optimizer_checkpoint(params, optimizer, expected_step=start_step)
+        restored_optimizer = restored["optimizer"]
+        validate_optimizer_checkpoint(params, restored_optimizer, expected_step=start_step)
+        replicated_state = replicate_pmap_tree(
+            {"optimizer": restored_optimizer, "params": params},
+            local_devices,
+        )
+        optimizer = replicated_state["optimizer"]
+        params = replicated_state["params"]
     train_step = jax.pmap(
         make_train_step(model_config, recipe.training, optimizer_hparams, model.forward),
         axis_name="data",
-        in_axes=(None, None, 0),
-        out_axes=(None, None, None),
+        in_axes=(0, 0, 0),
+        out_axes=(0, 0, 0),
         donate_argnums=(0, 1),
     )
 
@@ -732,6 +890,22 @@ def run(args: argparse.Namespace) -> int:
     last_metrics = None
     try:
         first_batch = next_batch()
+        first_batch_hash = batch_sha256(first_batch)
+        first_batch_hashes = allgather_sha256(first_batch_hash)
+        emit(
+            "first_batch",
+            rank=process_index,
+            rank_local_sha256=first_batch_hash,
+            runtime_rank_sha256=first_batch_hashes,
+        )
+        atomic_json(
+            output_dir / f"rank-{process_index:03d}-first-batch.json",
+            {
+                "rank": process_index,
+                "rank_local_sha256": first_batch_hash,
+                "runtime_rank_sha256": first_batch_hashes,
+            },
+        )
         multihost_utils.sync_global_devices("jaxsft-before-first-step")
         for step_index in range(start_step, stop_step):
             batch = first_batch if step_index == start_step else next_batch()
@@ -739,7 +913,14 @@ def run(args: argparse.Namespace) -> int:
             params, optimizer, metrics = train_step(params, optimizer, batch)
             metrics["loss"].block_until_ready()
             elapsed = time.monotonic() - step_started
-            host_metrics = {key: np.asarray(jax.device_get(value)).item() for key, value in metrics.items()}
+            host_metrics = {
+                key: replicated_metric_scalar(
+                    value,
+                    local_device_count=local_device_count,
+                    name=key,
+                )
+                for key, value in metrics.items()
+            }
             host_metrics["seconds"] = elapsed
             host_metrics["tokens_per_second"] = host_metrics["input_tokens"] / elapsed
             last_metrics = host_metrics
@@ -751,12 +932,18 @@ def run(args: argparse.Namespace) -> int:
                 and completed_step % recipe.training.checkpoint_every == 0
             )
             forced_stop_checkpoint = args.stop_after_step is not None and completed_step == stop_step
-            if (cadence_checkpoint or forced_stop_checkpoint) and process_index == 0:
+            if cadence_checkpoint or forced_stop_checkpoint:
+                checkpoint_params = unreplicate_pmap_tree(params, local_device_count=local_device_count)
+                checkpoint_optimizer = unreplicate_pmap_tree(optimizer, local_device_count=local_device_count)
+                replicated_state_hash = validate_replicated_state_across_processes(
+                    checkpoint_params,
+                    checkpoint_optimizer,
+                )
                 checkpoint_path = save_checkpoint(
                     output_dir,
                     completed_step,
-                    params,
-                    optimizer,
+                    checkpoint_params,
+                    checkpoint_optimizer,
                     recipe_identity_hash=recipe.identity_hash,
                     source_identity=source_identity,
                     topology=topology,
@@ -766,8 +953,15 @@ def run(args: argparse.Namespace) -> int:
                         "model_init_seed": recipe.run.seed,
                         "next_training_step": completed_step,
                     },
+                    replicated_state_hash=replicated_state_hash,
                 )
-                emit("checkpoint", rank=process_index, step=completed_step, path=checkpoint_path)
+                emit(
+                    "checkpoint",
+                    rank=process_index,
+                    step=completed_step,
+                    path=checkpoint_path,
+                    replicated_state_sha256=replicated_state_hash,
+                )
     finally:
         if stream is not None:
             close_started = time.monotonic()
@@ -787,6 +981,8 @@ def run(args: argparse.Namespace) -> int:
         "last_metrics": last_metrics,
         "stream_counters": None if counters is None else asdict(counters),
         "batch_tape_identity_sha256": None if batch_tape is None else batch_tape.identity_hash,
+        "first_batch_sha256": first_batch_hash,
+        "runtime_rank_first_batch_sha256": first_batch_hashes,
         "numerics": numerics,
     }
     atomic_json(output_dir / f"rank-{process_index:03d}-result.json", result)

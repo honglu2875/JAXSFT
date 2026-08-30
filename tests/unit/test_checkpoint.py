@@ -12,6 +12,8 @@ from train_sft import (
     git_identity,
     load_checkpoint,
     load_synthetic_cursor,
+    replicated_state_sha256,
+    resolve_checkpoint_path,
     save_checkpoint,
     validate_optimizer_checkpoint,
     validate_rng_checkpoint,
@@ -122,6 +124,53 @@ def test_checkpoint_rejects_corrupt_payload_before_unpickling(tmp_path):
             source_identity=SOURCE,
             topology=TOPOLOGY,
         )
+
+
+def test_multihost_checkpoint_uses_runtime_rank_path_and_round_trips(tmp_path):
+    params = {"kernel": jnp.arange(8, dtype=jnp.float32).reshape(2, 4)}
+    optimizer = adamw_init(params)._replace(step=jnp.asarray(2, jnp.int32))
+    topology = {**TOPOLOGY, "process_index": 2, "process_count": 4, "global_device_count": 16}
+    identity = "e" * 64
+    state_hash = replicated_state_sha256(params, optimizer)
+
+    path = save_checkpoint(
+        tmp_path,
+        2,
+        params,
+        optimizer,
+        recipe_identity_hash=identity,
+        source_identity=SOURCE,
+        topology=topology,
+        data_state={
+            "schema_version": 2,
+            "kind": "synthetic",
+            "batches_consumed": 2,
+            "length": 32,
+            "vocab_size": 128,
+        },
+        rng_state={"schema_version": 1, "model_init_seed": 17, "next_training_step": 2},
+        replicated_state_hash=state_hash,
+    )
+
+    assert path.relative_to(tmp_path).as_posix() == "checkpoints/step-00000002/rank-002.pkl"
+    assert resolve_checkpoint_path(path.parent, topology=topology) == path
+    restored = load_checkpoint(
+        resolve_checkpoint_path(path.parent, topology=topology),
+        recipe_identity_hash=identity,
+        source_identity=SOURCE,
+        topology=topology,
+    )
+    assert restored["replicated_state_sha256"] == state_hash
+    _assert_trees_equal(restored["params"], params)
+
+
+def test_replicated_state_hash_covers_optimizer_and_parameters():
+    params = {"kernel": jnp.arange(4, dtype=jnp.float32)}
+    optimizer = adamw_init(params)
+    baseline = replicated_state_sha256(params, optimizer)
+    assert replicated_state_sha256(params, optimizer) == baseline
+    assert replicated_state_sha256({"kernel": params["kernel"] + 1}, optimizer) != baseline
+    assert replicated_state_sha256(params, optimizer._replace(step=jnp.asarray(1, jnp.int32))) != baseline
 
 
 def test_git_source_identity_hashes_untracked_file_contents(tmp_path):

@@ -12,10 +12,12 @@ hosts = [
 coordinator_host = "worker-0.example.internal"
 coordinator_port = 12355
 
-# These are dedicated, run-scoped paths. The launcher never mutates a broad
-# home/workspace path and never kills by process name.
-remote_workspace_root = "/dev/shm/jaxsft-runs"
-remote_cache_root = "/dev/shm/jaxsft-cache"
+# Run metadata and checkpoints need persistent storage. Large reproducible
+# model/data/environment cache entries use RAM when capacity permits. A
+# /dev/shm cache requires passwordless sudo for ownership sealing across SSH
+# sessions on images where systemd-logind RemoveIPC is enabled.
+remote_workspace_root = "/var/tmp/jaxsft-runs"
+remote_cache_root = "/dev/shm/.jaxsft-cache"
 local_artifact_root = "artifacts/cluster"
 
 [ssh]

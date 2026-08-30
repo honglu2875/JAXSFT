@@ -65,6 +65,17 @@ parameters, and FP32 Adam moments. All loss and gradient metrics were finite.
 A tiny OLMo2 TPU run interrupted at step two and cold-resumed through step
 three; its final checkpoint was byte-identical to the uninterrupted reference.
 
+The later four-host v4-32 gate loaded the same 1,484,916,736-parameter revision
+on four JAX processes/16 devices and completed three additional materialized
+UltraChat updates. Runtime-rank first-batch hashes were all distinct, while
+every globally reduced loss, gradient norm, token count, denominator, and
+accuracy was identical across ranks. Loss moved from 1.93071 to 1.64470; the
+first compiled update took 54.45 seconds and the next two took 0.14–0.23
+seconds per host. All processes shut down cleanly. A same-trainer synthetic
+OLMo configuration separately proved the four-rank schema-v4 cold-resume path;
+resumed and uninterrupted step-three model/optimizer state hashes matched
+exactly. See [the acceptance record](../results/v4_32_multihost_acceptance.json).
+
 The 20-step BF16 trajectory subsequently completed under the same replicated
 v4-8 topology with `jax_default_matmul_precision=highest` and explicit
 `lax.Precision.HIGHEST`. Its first step, including compile, took 63.42 seconds;
