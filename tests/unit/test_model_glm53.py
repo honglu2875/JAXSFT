@@ -7,6 +7,8 @@ import pytest
 
 from jaxsft.lora import LoRAConfig, format_parameter_path, init_lora_adapters, merge_lora_adapters
 from jaxsft.models.glm5_3_flash import (
+    BatchedBlockFP8LinearKernel,
+    BlockFP8LinearKernel,
     GIB,
     OFFICIAL_CHECKPOINT,
     _PRECISION,
@@ -17,10 +19,12 @@ from jaxsft.models.glm5_3_flash import (
     attention_lora_parameter_count,
     attention_lora_target_paths,
     block_fp8_linear,
+    checkpoint_text_tensor_specs,
     dequantize_block_fp8,
     forward,
     init_params,
     parameter_count,
+    selected_block_fp8_linear,
     tiny_config,
     validate_params,
     v4_32_lora_preflight,
@@ -123,6 +127,74 @@ def _official_sized_index() -> SafetensorsIndex:
     )
 
 
+def _unit_scale_fp8_kernel(kernel, *, block_shape=(2, 2)):
+    source = jnp.swapaxes(kernel, -1, -2).astype(jnp.float8_e4m3fn)
+    bits = jax.lax.bitcast_convert_type(source, jnp.uint8)
+    scales = jnp.ones(
+        (source.shape[0] // block_shape[0], source.shape[1] // block_shape[1]),
+        jnp.float32,
+    )
+    wrapper = BlockFP8LinearKernel(
+        bits,
+        scales,
+        block_shape=block_shape,
+        compute_dtype=jnp.float32,
+    )
+    reference = jnp.swapaxes(source.astype(jnp.float32), -1, -2)
+    return wrapper, reference
+
+
+def _unit_scale_batched_fp8_kernel(kernel, *, block_shape=(2, 2)):
+    source = jnp.swapaxes(kernel, -1, -2).astype(jnp.float8_e4m3fn)
+    bits = jax.lax.bitcast_convert_type(source, jnp.uint8)
+    scales = jnp.ones(
+        (
+            source.shape[0],
+            source.shape[1] // block_shape[0],
+            source.shape[2] // block_shape[1],
+        ),
+        jnp.float32,
+    )
+    wrapper = BatchedBlockFP8LinearKernel(
+        bits,
+        scales,
+        block_shape=block_shape,
+        compute_dtype=jnp.float32,
+    )
+    reference = jnp.swapaxes(source.astype(jnp.float32), -1, -2)
+    return wrapper, reference
+
+
+def _quantize_tiny_linear_tree(value, path=()):
+    if isinstance(value, tuple):
+        pairs = [_quantize_tiny_linear_tree(item, path + (index,)) for index, item in enumerate(value)]
+        return tuple(pair[0] for pair in pairs), tuple(pair[1] for pair in pairs)
+    if isinstance(value, dict):
+        quantized = {}
+        reference = {}
+        if "experts_gate_up" in value:
+            gate, up = jnp.split(value["experts_gate_up"], 2, axis=-1)
+            quantized["experts_gate"], gate_reference = _unit_scale_batched_fp8_kernel(gate)
+            quantized["experts_up"], up_reference = _unit_scale_batched_fp8_kernel(up)
+            quantized["experts_down"], down_reference = _unit_scale_batched_fp8_kernel(
+                value["experts_down"]
+            )
+            reference["experts_gate_up"] = jnp.concatenate((gate_reference, up_reference), axis=-1)
+            reference["experts_down"] = down_reference
+        for key, item in value.items():
+            if key in {"experts_gate_up", "experts_down"} and "experts_gate_up" in value:
+                continue
+            quantized[key], reference[key] = _quantize_tiny_linear_tree(item, path + (key,))
+        return quantized, reference
+    if (
+        hasattr(value, "ndim")
+        and value.ndim == 2
+        and path[-1] not in {"embed_tokens", "conv1d", "index_kpool_compress_ape"}
+    ):
+        return _unit_scale_fp8_kernel(value)
+    return value, value
+
+
 def test_config_parses_hybrid_layout_and_rejects_inconsistent_partition():
     config = Glm53TextConfig.from_dict(_config_dict())
     assert config.layer_types == ("linear_attention", "deepseek_sparse_attention")
@@ -145,6 +217,23 @@ def test_attention_lora_count_uses_architecture_specific_matrix_shapes():
     assert len(targets) == 34 * 4 + 11 * 5
     assert ("layers", 0, "self_attn", "q_proj") in targets
     assert ("layers", 3, "self_attn", "kv_b_proj") in targets
+
+
+def test_checkpoint_text_schema_names_every_logical_source_and_expert_pack_member():
+    specs = checkpoint_text_tensor_specs(_official_config())
+    assert len(specs) == 37_534
+    assert len({spec.source_name for spec in specs}) == len(specs)
+    by_name = {spec.source_name: spec for spec in specs}
+    assert by_name["lm_head.weight"].source_shape == (154_880, 4_096)
+    assert by_name["lm_head.weight"].transform == "transpose"
+    conv = by_name["model.language_model.layers.0.self_attn.q_conv1d.weight"]
+    assert conv.source_shape == (8_192, 1, 4)
+    assert conv.transform == "squeeze_conv"
+    expert = by_name["model.language_model.layers.3.mlp.experts.287.down_proj.weight"]
+    assert expert.source_shape == (4_096, 2_048)
+    assert expert.target_path[-1] == "experts_down"
+    assert expert.pack_index == 287
+    assert sum(spec.transform == "expert_transpose" for spec in specs) == 42 * 288 * 3
 
 
 def test_safetensors_index_is_strict_and_verifies_contract(tmp_path):
@@ -269,6 +358,52 @@ def test_block_fp8_validation_fails_closed():
         dequantize_block_fp8(bits, scales, block_shape=(2, 3), dtype=jnp.float16)
 
 
+def test_block_fp8_kernel_pytrees_and_selected_experts_match_dense_reference():
+    values = jnp.asarray(
+        np.linspace(-3.0, 3.0, num=3 * 4 * 6).reshape(3, 4, 6),
+        dtype=jnp.float8_e4m3fn,
+    )
+    bits = jax.lax.bitcast_convert_type(values, jnp.uint8)
+    scales = jnp.asarray(
+        [
+            [[0.5, 1.0], [1.5, 2.0]],
+            [[0.75, 1.25], [1.75, 2.25]],
+            [[1.0, 1.5], [2.0, 2.5]],
+        ],
+        jnp.float32,
+    )
+    kernel = BatchedBlockFP8LinearKernel(
+        bits,
+        scales,
+        block_shape=(2, 3),
+        compute_dtype=jnp.float32,
+    )
+    assert kernel.shape == (3, 6, 4)
+    mapped = jax.tree.map(lambda value: value, kernel)
+    assert isinstance(mapped, BatchedBlockFP8LinearKernel)
+
+    inputs = jnp.asarray([[1, 2, 3, 4, 5, 6], [-2, 1, 0.5, 3, -1, 2]], jnp.float32)
+    indices = jnp.asarray([[0, 2], [1, 0]], jnp.int32)
+    actual = jax.jit(selected_block_fp8_linear)(inputs, indices, kernel)
+    dense = jax.vmap(
+        lambda expert_bits, expert_scales: dequantize_block_fp8(
+            expert_bits,
+            expert_scales,
+            block_shape=(2, 3),
+            dtype=jnp.float32,
+        )
+    )(bits, scales)
+    expected = jnp.einsum("ti,tkoi->tko", inputs, dense[indices], precision=_PRECISION)
+    assert np.allclose(actual, expected, atol=2e-6, rtol=2e-6)
+
+    single = BlockFP8LinearKernel(
+        bits[0], scales[0], block_shape=(2, 3), compute_dtype=jnp.float32
+    )
+    assert single.shape == (6, 4)
+    assert single.ndim == 2
+    assert single.size == 24
+
+
 def test_bfloat16_expansion_fails_v4_32_before_activations():
     assert OFFICIAL_CHECKPOINT.logical_parameter_count == 321_323_031_390
     assert dict(OFFICIAL_CHECKPOINT.serialized_element_counts_by_dtype)["F32"] == 19_484_766
@@ -352,6 +487,52 @@ def test_reduced_hybrid_model_forward_backward_and_shapes():
 
     gradients = jax.grad(endpoint_loss)(selected)
     assert all(np.asarray(jnp.isfinite(value).all()) for value in jax.tree.leaves(gradients))
+
+
+def test_full_reduced_fp8_wrappers_and_expert_packs_match_dequantized_lora_reference():
+    config = tiny_config(vocab_size=48)
+    original = init_params(jax.random.key(21), config, dtype=jnp.float32)
+    quantized, reference = _quantize_tiny_linear_tree(original)
+    ids = jnp.asarray([[1, 2, 3], [4, 5, 0]], jnp.int32)
+    mask = jnp.asarray([[1, 1, 1], [1, 1, 0]], bool)
+
+    quantized_logits = forward(quantized, config, ids, attention_mask=mask)
+    reference_logits = forward(reference, config, ids, attention_mask=mask)
+    assert np.allclose(quantized_logits, reference_logits, atol=2e-5, rtol=2e-5)
+
+    lora_config = LoRAConfig(rank=2, alpha=4.0)
+    targets = attention_lora_target_paths(config)
+    adapters = init_lora_adapters(
+        jax.random.key(22),
+        quantized,
+        targets,
+        eligible_paths=targets,
+        config=lora_config,
+        dtype=jnp.float32,
+    )
+
+    def adapter_loss(base, current_adapters):
+        logits = forward(
+            base,
+            config,
+            ids,
+            attention_mask=mask,
+            adapters=current_adapters,
+            lora_config=lora_config,
+        )
+        return jnp.mean(jnp.square(logits.astype(jnp.float32)))
+
+    quantized_loss, quantized_grad = jax.value_and_grad(adapter_loss, argnums=1)(
+        quantized, adapters
+    )
+    reference_loss, reference_grad = jax.value_and_grad(adapter_loss, argnums=1)(
+        reference, adapters
+    )
+    assert np.allclose(quantized_loss, reference_loss, atol=2e-5, rtol=2e-5)
+    for actual, expected in zip(
+        jax.tree.leaves(quantized_grad), jax.tree.leaves(reference_grad), strict=True
+    ):
+        assert np.allclose(actual, expected, atol=3e-5, rtol=3e-5)
 
 
 def test_glm_attention_lora_zero_identity_and_merged_equivalence():

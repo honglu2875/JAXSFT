@@ -491,6 +491,177 @@ def block_fp8_linear(
     return flat_output.reshape((*leading_shape, rows)).astype(output_dtype)
 
 
+@jax.tree_util.register_pytree_node_class
+@dataclass(frozen=True)
+class BlockFP8LinearKernel:
+    """Frozen source-oriented block-FP8 matrix with a logical ``[in,out]`` shape."""
+
+    weight_bits: Any
+    weight_scale_inv: Any
+    block_shape: tuple[int, int] = (128, 128)
+    compute_dtype: Any = jnp.bfloat16
+
+    def __post_init__(self) -> None:
+        _validate_block_fp8_shapes(self.weight_bits, self.weight_scale_inv, self.block_shape)
+        if self.weight_bits.dtype != jnp.uint8:
+            raise TypeError("BlockFP8LinearKernel stores raw uint8 E4M3 bits")
+        if not jnp.issubdtype(self.weight_scale_inv.dtype, jnp.floating):
+            raise TypeError("BlockFP8LinearKernel scales must be floating point")
+        if jnp.dtype(self.compute_dtype) not in (jnp.bfloat16, jnp.float32):
+            raise ValueError("BlockFP8LinearKernel compute_dtype must be bfloat16 or float32")
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return int(self.weight_bits.shape[1]), int(self.weight_bits.shape[0])
+
+    @property
+    def ndim(self) -> int:
+        return 2
+
+    @property
+    def size(self) -> int:
+        return math.prod(self.shape)
+
+    @property
+    def dtype(self) -> jnp.dtype:
+        return jnp.dtype(self.compute_dtype)
+
+    def tree_flatten(self):
+        children = (self.weight_bits, self.weight_scale_inv)
+        auxiliary = (self.block_shape, jnp.dtype(self.compute_dtype).name)
+        return children, auxiliary
+
+    @classmethod
+    def tree_unflatten(cls, auxiliary, children):
+        block_shape, compute_dtype = auxiliary
+        weight_bits, weight_scale_inv = children
+        return cls(
+            weight_bits,
+            weight_scale_inv,
+            block_shape=block_shape,
+            compute_dtype=jnp.dtype(compute_dtype),
+        )
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclass(frozen=True)
+class BatchedBlockFP8LinearKernel:
+    """Packed expert matrices stored as ``[expert,out,in]`` FP8 source bits."""
+
+    weight_bits: Any
+    weight_scale_inv: Any
+    block_shape: tuple[int, int] = (128, 128)
+    compute_dtype: Any = jnp.bfloat16
+
+    def __post_init__(self) -> None:
+        if self.weight_bits.ndim != 3 or self.weight_scale_inv.ndim != 3:
+            raise ValueError("batched block-FP8 weights and scales must both be rank three")
+        experts, rows, columns = self.weight_bits.shape
+        block_rows, block_columns = self.block_shape
+        if (
+            experts <= 0
+            or block_rows <= 0
+            or block_columns <= 0
+            or rows % block_rows
+            or columns % block_columns
+        ):
+            raise ValueError("batched block-FP8 weights are not divisible by the block shape")
+        expected_scale_shape = (experts, rows // block_rows, columns // block_columns)
+        if self.weight_scale_inv.shape != expected_scale_shape:
+            raise ValueError(
+                f"batched scale grid has shape {self.weight_scale_inv.shape}, "
+                f"expected {expected_scale_shape}"
+            )
+        if self.weight_bits.dtype != jnp.uint8:
+            raise TypeError("BatchedBlockFP8LinearKernel stores raw uint8 E4M3 bits")
+        if not jnp.issubdtype(self.weight_scale_inv.dtype, jnp.floating):
+            raise TypeError("batched block-FP8 scales must be floating point")
+        if jnp.dtype(self.compute_dtype) not in (jnp.bfloat16, jnp.float32):
+            raise ValueError("batched block-FP8 compute_dtype must be bfloat16 or float32")
+
+    @property
+    def shape(self) -> tuple[int, int, int]:
+        return (
+            int(self.weight_bits.shape[0]),
+            int(self.weight_bits.shape[2]),
+            int(self.weight_bits.shape[1]),
+        )
+
+    @property
+    def dtype(self) -> jnp.dtype:
+        return jnp.dtype(self.compute_dtype)
+
+    def tree_flatten(self):
+        children = (self.weight_bits, self.weight_scale_inv)
+        auxiliary = (self.block_shape, jnp.dtype(self.compute_dtype).name)
+        return children, auxiliary
+
+    @classmethod
+    def tree_unflatten(cls, auxiliary, children):
+        block_shape, compute_dtype = auxiliary
+        weight_bits, weight_scale_inv = children
+        return cls(
+            weight_bits,
+            weight_scale_inv,
+            block_shape=block_shape,
+            compute_dtype=jnp.dtype(compute_dtype),
+        )
+
+
+def selected_block_fp8_linear(
+    inputs: Any,
+    expert_indices: Any,
+    kernel: BatchedBlockFP8LinearKernel,
+    *,
+    output_dtype: Any | None = None,
+) -> jax.Array:
+    """Apply token-selected packed experts without expanding the full expert bank.
+
+    The selected temporary scales with ``tokens * top_k`` and is acceptable for
+    the short G5 forward gate.  G6 must replace this reference gather with a
+    capacity-bounded expert-dispatch kernel before increasing sequence length.
+    """
+
+    inputs = jnp.asarray(inputs)
+    expert_indices = jnp.asarray(expert_indices)
+    if inputs.ndim != 2 or expert_indices.ndim != 2 or inputs.shape[0] != expert_indices.shape[0]:
+        raise ValueError("selected expert inputs must be [tokens,in] with indices [tokens,top_k]")
+    experts, input_size, output_size = kernel.shape
+    if inputs.shape[1] != input_size:
+        raise ValueError(f"selected expert input width {inputs.shape[1]} does not match {input_size}")
+    if not jnp.issubdtype(inputs.dtype, jnp.floating):
+        raise TypeError("selected expert inputs must be floating point")
+    if not jnp.issubdtype(expert_indices.dtype, jnp.integer):
+        raise TypeError("selected expert indices must be integers")
+    if output_dtype is None:
+        output_dtype = inputs.dtype
+    output_dtype = jnp.dtype(output_dtype)
+    compute_dtype = jnp.dtype(kernel.compute_dtype)
+    block_rows, block_columns = kernel.block_shape
+    selected_bits = kernel.weight_bits[expert_indices]
+    selected_scales = kernel.weight_scale_inv[expert_indices]
+    quantized = fp8_e4m3fn_from_bits(selected_bits).astype(compute_dtype).reshape(
+        inputs.shape[0],
+        expert_indices.shape[1],
+        output_size // block_rows,
+        block_rows,
+        input_size // block_columns,
+        block_columns,
+    )
+    scales = selected_scales.astype(compute_dtype)[..., :, None, :, None]
+    dense = (quantized * scales).reshape(
+        inputs.shape[0], expert_indices.shape[1], output_size, input_size
+    )
+    output = jnp.einsum(
+        "ti,tkoi->tko",
+        inputs.astype(compute_dtype),
+        dense,
+        precision=_PRECISION,
+        preferred_element_type=jnp.float32,
+    )
+    return output.astype(output_dtype)
+
+
 @dataclass(frozen=True)
 class LinearAttentionConfig:
     num_heads: int
@@ -990,6 +1161,214 @@ def _expected_shapes(config: Glm53TextConfig) -> ArrayTree:
     }
 
 
+@dataclass(frozen=True)
+class Glm53CheckpointTensorSpec:
+    """One logical text tensor and its deterministic executable destination."""
+
+    source_name: str
+    target_path: tuple[str | int, ...]
+    source_shape: tuple[int, ...]
+    transform: str
+    pack_index: int | None = None
+
+    def __post_init__(self) -> None:
+        if not self.source_name or not self.target_path or not self.source_shape:
+            raise ValueError("checkpoint tensor specs require a name, target path, and shape")
+        if any(size <= 0 for size in self.source_shape):
+            raise ValueError(f"checkpoint tensor {self.source_name!r} has an invalid source shape")
+        if self.transform not in {"identity", "transpose", "squeeze_conv", "expert_transpose"}:
+            raise ValueError(f"checkpoint tensor {self.source_name!r} has an unknown transform")
+        if (self.transform == "expert_transpose") != (self.pack_index is not None):
+            raise ValueError("only expert_transpose specs require a pack index")
+
+
+def checkpoint_text_tensor_specs(config: Glm53TextConfig) -> tuple[Glm53CheckpointTensorSpec, ...]:
+    """Describe every non-scale tensor in the pinned text-only checkpoint.
+
+    This is deliberately independent of a safetensors index.  The G5 schema
+    audit compares these architecture-derived names and shapes with all real
+    shard headers, then attaches each ``weight_scale_inv`` tensor to its
+    logical FP8 weight.  Expert source tensors map into packed executable
+    arrays but remain individually named here so omissions cannot hide inside
+    a packing operation.
+    """
+
+    root = "model.language_model."
+    specs: list[Glm53CheckpointTensorSpec] = []
+
+    def add(
+        source_name: str,
+        target_path: tuple[str | int, ...],
+        source_shape: tuple[int, ...],
+        transform: str = "identity",
+        *,
+        pack_index: int | None = None,
+    ) -> None:
+        specs.append(
+            Glm53CheckpointTensorSpec(
+                source_name=source_name,
+                target_path=target_path,
+                source_shape=source_shape,
+                transform=transform,
+                pack_index=pack_index,
+            )
+        )
+
+    def add_matrix(
+        source_name: str,
+        target_path: tuple[str | int, ...],
+        target_shape: tuple[int, int],
+    ) -> None:
+        add(source_name, target_path, (target_shape[1], target_shape[0]), "transpose")
+
+    add(root + "embed_tokens.weight", ("embed_tokens",), (config.vocab_size, config.hidden_size))
+    add(root + "norm.weight", ("norm",), (config.hidden_size,))
+    add("lm_head.weight", ("lm_head",), (config.vocab_size, config.hidden_size), "transpose")
+
+    expected_layers = _expected_shapes(config)["layers"]
+    linear_width = config.linear_attention.num_heads * config.linear_attention.head_dim
+    for layer_index, (attention_type, mlp_type) in enumerate(
+        zip(config.layer_types, config.mlp_layer_types, strict=True)
+    ):
+        source_layer = root + f"layers.{layer_index}."
+        target_layer: tuple[str | int, ...] = ("layers", layer_index)
+        expected = expected_layers[layer_index]
+        for name in ("input_layernorm", "post_attention_layernorm"):
+            add(
+                source_layer + name + ".weight",
+                target_layer + (name,),
+                expected[name],
+            )
+        for site, checkpoint_site in (("attn_hc", "attn"), ("ffn_hc", "ffn")):
+            add_matrix(
+                source_layer + f"hc_{checkpoint_site}_fn",
+                target_layer + (site, "fn"),
+                expected[site]["fn"],
+            )
+            for name in ("base", "scale"):
+                add(
+                    source_layer + f"hc_{checkpoint_site}_{name}",
+                    target_layer + (site, name),
+                    expected[site][name],
+                )
+
+        source_attention = source_layer + "self_attn."
+        target_attention = target_layer + ("self_attn",)
+        attention_shapes = expected["self_attn"]
+        if attention_type == "linear_attention":
+            for name in ("q_proj", "k_proj", "v_proj"):
+                add_matrix(
+                    source_attention + name + ".weight",
+                    target_attention + (name,),
+                    attention_shapes[name],
+                )
+            for name in ("q", "k", "v"):
+                add(
+                    source_attention + f"{name}_conv1d.weight",
+                    target_attention + (f"{name}_conv1d",),
+                    (linear_width, 1, config.linear_attention.short_conv_kernel_size),
+                    "squeeze_conv",
+                )
+            for name in ("f_a_proj", "f_b_proj", "b_proj", "g_a_proj", "g_b_proj", "o_proj"):
+                add_matrix(
+                    source_attention + name + ".weight",
+                    target_attention + (name,),
+                    attention_shapes[name],
+                )
+            for name in ("dt_bias", "A_log"):
+                add(source_attention + name, target_attention + (name,), attention_shapes[name])
+            add(
+                source_attention + "o_norm.weight",
+                target_attention + ("o_norm",),
+                attention_shapes["o_norm"],
+            )
+        else:
+            for name in ("q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "kv_b_proj", "o_proj"):
+                add_matrix(
+                    source_attention + name + ".weight",
+                    target_attention + (name,),
+                    attention_shapes[name],
+                )
+            for name in ("q_a_layernorm", "kv_a_layernorm"):
+                add(
+                    source_attention + name + ".weight",
+                    target_attention + (name,),
+                    attention_shapes[name],
+                )
+            source_indexer = source_attention + "indexer."
+            target_indexer = target_attention + ("indexer",)
+            indexer_shapes = attention_shapes["indexer"]
+            for source_name, target_name in (
+                ("wq_b.weight", "wq_b"),
+                ("wk.weight", "wk"),
+                ("weights_proj.weight", "weights_proj"),
+                ("index_kpool_compress_gate", "index_kpool_compress_gate"),
+            ):
+                add_matrix(
+                    source_indexer + source_name,
+                    target_indexer + (target_name,),
+                    indexer_shapes[target_name],
+                )
+            for source_name, target_name in (
+                ("k_norm.weight", "k_norm_weight"),
+                ("k_norm.bias", "k_norm_bias"),
+                ("index_kpool_compress_ape", "index_kpool_compress_ape"),
+            ):
+                add(
+                    source_indexer + source_name,
+                    target_indexer + (target_name,),
+                    indexer_shapes[target_name],
+                )
+
+        source_mlp = source_layer + "mlp."
+        target_mlp = target_layer + ("mlp",)
+        mlp_shapes = expected["mlp"]
+        if mlp_type == "dense":
+            for name in ("gate_proj", "up_proj", "down_proj"):
+                add_matrix(
+                    source_mlp + name + ".weight",
+                    target_mlp + (name,),
+                    mlp_shapes[name],
+                )
+        else:
+            add_matrix(
+                source_mlp + "gate.weight",
+                target_mlp + ("router",),
+                mlp_shapes["router"],
+            )
+            add(
+                source_mlp + "gate.e_score_correction_bias",
+                target_mlp + ("router_correction_bias",),
+                mlp_shapes["router_correction_bias"],
+            )
+            for name in ("gate_proj", "up_proj", "down_proj"):
+                target_name = f"shared_{name}"
+                add_matrix(
+                    source_mlp + f"shared_experts.{name}.weight",
+                    target_mlp + (target_name,),
+                    mlp_shapes[target_name],
+                )
+            expert_shapes = {
+                "gate_proj": (config.moe_intermediate_size, config.hidden_size),
+                "up_proj": (config.moe_intermediate_size, config.hidden_size),
+                "down_proj": (config.hidden_size, config.moe_intermediate_size),
+            }
+            for expert_index in range(config.n_routed_experts):
+                for name, source_shape in expert_shapes.items():
+                    add(
+                        source_mlp + f"experts.{expert_index}.{name}.weight",
+                        target_mlp + (f"experts_{name.removesuffix('_proj')}",),
+                        source_shape,
+                        "expert_transpose",
+                        pack_index=expert_index,
+                    )
+
+    names = [spec.source_name for spec in specs]
+    if len(set(names)) != len(names):
+        raise ValueError("GLM-5.3 checkpoint tensor specification contains duplicate source names")
+    return tuple(specs)
+
+
 def parameter_count(config: Glm53TextConfig) -> int:
     shapes = jax.tree.leaves(
         _expected_shapes(config),
@@ -1151,9 +1530,22 @@ def _layer_norm(x: jax.Array, weight: jax.Array, bias: jax.Array, epsilon: float
     return (value * weight.astype(jnp.float32) + bias.astype(jnp.float32)).astype(output_dtype)
 
 
+def _base_linear(x: jax.Array, kernel: Any) -> jax.Array:
+    if isinstance(kernel, BlockFP8LinearKernel):
+        return block_fp8_linear(
+            x,
+            kernel.weight_bits,
+            kernel.weight_scale_inv,
+            block_shape=kernel.block_shape,
+            compute_dtype=kernel.compute_dtype,
+            output_dtype=x.dtype,
+        )
+    return jnp.einsum("...i,io->...o", x, kernel, precision=_PRECISION)
+
+
 def _linear(
     x: jax.Array,
-    kernel: jax.Array,
+    kernel: Any,
     path: tuple[str | int, ...],
     adapters: Mapping[str, Mapping[str, jax.Array]] | None,
     lora_config: LoRAConfig | None,
@@ -1161,8 +1553,22 @@ def _linear(
     if adapters is not None and format_parameter_path(path) in adapters:
         if lora_config is None:
             raise ValueError("LoRA adapters require a LoRAConfig")
-        return lora_linear(x, kernel, adapter_for_path(adapters, path), config=lora_config)
-    return jnp.einsum("...i,io->...o", x, kernel, precision=_PRECISION)
+        adapter = adapter_for_path(adapters, path)
+        if not isinstance(kernel, BlockFP8LinearKernel):
+            return lora_linear(x, kernel, adapter, config=lora_config)
+        a, b = adapter["a"], adapter["b"]
+        if tuple(a.shape) != (kernel.shape[0], lora_config.rank) or tuple(b.shape) != (
+            lora_config.rank,
+            kernel.shape[1],
+        ):
+            raise ValueError("LoRA adapter shapes do not match the block-FP8 kernel/config")
+        base = _base_linear(x, kernel)
+        hidden = jnp.matmul(x.astype(a.dtype), a, precision=_PRECISION)
+        delta = jnp.matmul(hidden, b, precision=_PRECISION) * jnp.asarray(
+            lora_config.scale, hidden.dtype
+        )
+        return base + delta.astype(base.dtype)
+    return _base_linear(x, kernel)
 
 
 def _hyper_connection(
@@ -1173,12 +1579,7 @@ def _hyper_connection(
     hc = config.hc_mult
     flat = hidden_streams.reshape(*hidden_streams.shape[:2], hc * config.hidden_size)
     flat = _unweighted_rms_norm(flat, config.rms_norm_eps)
-    logits = jnp.einsum(
-        "...i,io->...o",
-        flat,
-        params["fn"].astype(jnp.float32),
-        precision=_PRECISION,
-    )
+    logits = _base_linear(flat, params["fn"]).astype(jnp.float32)
     pre_w, post_w, comb_w = jnp.split(logits, (hc, 2 * hc), axis=-1)
     pre_b, post_b, comb_b = jnp.split(params["base"].astype(jnp.float32), (hc, 2 * hc))
     scales = params["scale"].astype(jnp.float32)
@@ -1282,8 +1683,14 @@ def _linear_attention(
         _linear(hidden, params[name], prefix + (name,), adapters, lora_config)
         for name in ("q_proj", "k_proj", "v_proj")
     ]
-    mixed = _causal_depthwise_conv(jnp.concatenate(projected, axis=-1), params["conv1d"])
-    query, key, value = jnp.split(mixed, 3, axis=-1)
+    if "conv1d" in params:
+        mixed = _causal_depthwise_conv(jnp.concatenate(projected, axis=-1), params["conv1d"])
+        query, key, value = jnp.split(mixed, 3, axis=-1)
+    else:
+        query, key, value = (
+            _causal_depthwise_conv(value, params[f"{name}_conv1d"])
+            for name, value in zip(("q", "k", "v"), projected, strict=True)
+        )
     heads = config.linear_attention.num_heads
     head_dim = config.linear_attention.head_dim
     query, key, value = [item.reshape(batch, length, heads, head_dim) for item in (query, key, value)]
@@ -1332,13 +1739,11 @@ def _sparse_topk_indices(
     """No-cache DSA k-pool indexer with static shapes for SFT."""
 
     batch, length, _ = hidden.shape
-    q = jnp.einsum("...i,io->...o", q_residual, params["wq_b"], precision=_PRECISION)
+    q = _base_linear(q_residual, params["wq_b"])
     q = q.reshape(batch, length, config.index_n_heads, config.index_head_dim)
-    key = jnp.einsum("...i,io->...o", hidden, params["wk"], precision=_PRECISION)
+    key = _base_linear(hidden, params["wk"])
     key = _layer_norm(key, params["k_norm_weight"], params["k_norm_bias"], 1e-6)
-    gate_scores = jnp.einsum(
-        "...i,io->...o", hidden, params["index_kpool_compress_gate"], precision=_PRECISION
-    )
+    gate_scores = _base_linear(hidden, params["index_kpool_compress_gate"])
     valid_keys = attention_mask.astype(bool)
     query_positions = jnp.arange(length)[None, :, None]
     key_positions = jnp.arange(length)[None, None, :]
@@ -1371,9 +1776,9 @@ def _sparse_topk_indices(
         precision=_PRECISION,
     )
     scores = jax.nn.relu(scores * (config.index_head_dim**-0.5))
-    weights = jnp.einsum(
-        "...i,io->...o", hidden, params["weights_proj"], precision=_PRECISION
-    ).astype(jnp.float32) * (config.index_n_heads**-0.5)
+    weights = _base_linear(hidden, params["weights_proj"]).astype(jnp.float32) * (
+        config.index_n_heads**-0.5
+    )
     index_scores = jnp.einsum("bsh,bshp->bsp", weights, scores, precision=_PRECISION)
 
     pool_end = jnp.clip(pool_indices[..., -1], 0, length - 1)
@@ -1494,21 +1899,16 @@ def _swiglu(gate: jax.Array, up: jax.Array, limit: float) -> jax.Array:
 
 
 def _dense_mlp(params: ArrayTree, config: Glm53TextConfig, hidden: jax.Array) -> jax.Array:
-    gate = jnp.einsum("...i,io->...o", hidden, params["gate_proj"], precision=_PRECISION)
-    up = jnp.einsum("...i,io->...o", hidden, params["up_proj"], precision=_PRECISION)
+    gate = _base_linear(hidden, params["gate_proj"])
+    up = _base_linear(hidden, params["up_proj"])
     activated = _swiglu(gate, up, config.swiglu_limit)
-    return jnp.einsum("...i,io->...o", activated, params["down_proj"], precision=_PRECISION)
+    return _base_linear(activated, params["down_proj"])
 
 
 def _moe(params: ArrayTree, config: Glm53TextConfig, hidden: jax.Array) -> jax.Array:
     original_shape = hidden.shape
     tokens = hidden.reshape(-1, config.hidden_size)
-    router_logits = jnp.einsum(
-        "ti,ie->te",
-        tokens.astype(jnp.float32),
-        params["router"].astype(jnp.float32),
-        precision=_PRECISION,
-    )
+    router_logits = _base_linear(tokens.astype(jnp.float32), params["router"]).astype(jnp.float32)
     scores = jax.nn.sigmoid(router_logits)
     choice_scores = scores + params["router_correction_bias"].astype(jnp.float32)
     experts_per_group = config.n_routed_experts // config.n_group
@@ -1524,26 +1924,32 @@ def _moe(params: ArrayTree, config: Glm53TextConfig, hidden: jax.Array) -> jax.A
         topk_weights /= jnp.sum(topk_weights, axis=-1, keepdims=True) + 1e-20
     topk_weights *= config.routed_scaling_factor
 
-    selected_gate_up = params["experts_gate_up"][topk_indices]
-    gate_up = jnp.einsum(
-        "th,tkhi->tki", tokens, selected_gate_up, precision=_PRECISION
-    )
-    gate, up = jnp.split(gate_up, 2, axis=-1)
+    if "experts_gate" in params:
+        gate = selected_block_fp8_linear(tokens, topk_indices, params["experts_gate"])
+        up = selected_block_fp8_linear(tokens, topk_indices, params["experts_up"])
+    else:
+        selected_gate_up = params["experts_gate_up"][topk_indices]
+        gate_up = jnp.einsum(
+            "th,tkhi->tki", tokens, selected_gate_up, precision=_PRECISION
+        )
+        gate, up = jnp.split(gate_up, 2, axis=-1)
     activated = _swiglu(gate, up, config.swiglu_limit)
-    selected_down = params["experts_down"][topk_indices]
-    routed = jnp.einsum("tki,tkih->tkh", activated, selected_down, precision=_PRECISION)
+    if isinstance(params["experts_down"], BatchedBlockFP8LinearKernel):
+        routed = selected_block_fp8_linear(
+            activated.reshape(-1, activated.shape[-1]),
+            topk_indices.reshape(-1, 1),
+            params["experts_down"],
+        )
+        routed = routed.reshape(*activated.shape[:-1], config.hidden_size)
+    else:
+        selected_down = params["experts_down"][topk_indices]
+        routed = jnp.einsum("tki,tkih->tkh", activated, selected_down, precision=_PRECISION)
     routed = jnp.sum(routed * topk_weights.astype(routed.dtype)[..., None], axis=1)
 
-    shared_gate = jnp.einsum(
-        "...i,io->...o", hidden, params["shared_gate_proj"], precision=_PRECISION
-    )
-    shared_up = jnp.einsum(
-        "...i,io->...o", hidden, params["shared_up_proj"], precision=_PRECISION
-    )
+    shared_gate = _base_linear(hidden, params["shared_gate_proj"])
+    shared_up = _base_linear(hidden, params["shared_up_proj"])
     shared = _swiglu(shared_gate, shared_up, config.swiglu_limit)
-    shared = jnp.einsum(
-        "...i,io->...o", shared, params["shared_down_proj"], precision=_PRECISION
-    )
+    shared = _base_linear(shared, params["shared_down_proj"])
     return routed.reshape(original_shape) + shared
 
 
@@ -1637,7 +2043,7 @@ def forward(
             layer_fn = jax.checkpoint(layer_fn)
         hidden_streams = layer_fn(hidden_streams, layer_params)
     hidden = _rms_norm(jnp.mean(hidden_streams, axis=2), params["norm"], config.rms_norm_eps)
-    return jnp.einsum("...i,iv->...v", hidden, params["lm_head"], precision=_PRECISION)
+    return _base_linear(hidden, params["lm_head"])
 
 
 def _numpy_value(value: Any) -> np.ndarray:
@@ -2017,6 +2423,8 @@ def v4_32_lora_preflight(
 
 __all__ = [
     "ArrayTree",
+    "BatchedBlockFP8LinearKernel",
+    "BlockFP8LinearKernel",
     "GIB",
     "OFFICIAL_CHECKPOINT",
     "OFFICIAL_CONFIG_SHA256",
@@ -2024,6 +2432,7 @@ __all__ = [
     "OFFICIAL_REPO_ID",
     "OFFICIAL_REVISION",
     "CheckpointContract",
+    "Glm53CheckpointTensorSpec",
     "Glm53TextConfig",
     "LinearAttentionConfig",
     "MemoryLine",
@@ -2035,6 +2444,7 @@ __all__ = [
     "attention_lora_parameter_count",
     "attention_lora_target_paths",
     "block_fp8_linear",
+    "checkpoint_text_tensor_specs",
     "convert_hf_state_dict",
     "dequantize_block_fp8",
     "forward",
@@ -2042,6 +2452,7 @@ __all__ = [
     "init_params",
     "parameter_count",
     "recurrent_kimi_delta_attention",
+    "selected_block_fp8_linear",
     "tiny_config",
     "validate_params",
     "v4_32_lora_preflight",
