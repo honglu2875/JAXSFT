@@ -3,7 +3,11 @@ from pathlib import Path
 
 import pytest
 
-from scripts.plan_glm53_lora import validate_kernel_evidence, validate_loader_evidence
+from scripts.plan_glm53_lora import (
+    validate_execution_schema_evidence,
+    validate_kernel_evidence,
+    validate_loader_evidence,
+)
 
 
 def test_glm53_kernel_evidence_is_validated_instead_of_boolean_asserted(tmp_path):
@@ -49,3 +53,18 @@ def test_glm53_loader_evidence_rehashes_header_audit_and_enforces_bounds(tmp_pat
     (tmp_path / header_name).write_text(json.dumps(header))
     with pytest.raises(ValueError, match="header audit SHA-256 mismatch"):
         validate_loader_evidence(tampered)
+
+
+def test_glm53_execution_schema_evidence_is_complete_and_bounded(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    evidence_path = root / "docs" / "results" / "glm53_execution_schema_audit.json"
+    validated = validate_execution_schema_evidence(evidence_path)
+    assert validated["source_revision"] == "5653518a9d7c1c165bf01049b06b240be04650d0"
+    assert validated["staging_per_host_bytes"] == 150_994_944
+
+    payload = json.loads(evidence_path.read_text())
+    payload["coverage"]["logical_tensor_count"] -= 1
+    tampered = tmp_path / "schema.json"
+    tampered.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="logical tensor count"):
+        validate_execution_schema_evidence(tampered)

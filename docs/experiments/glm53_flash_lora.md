@@ -58,12 +58,14 @@ slices from most source files. The loader must either:
 3. perform a bounded one-file-at-a-time read per host, accepting duplicated
    network traffic as an initial correctness baseline.
 
-The audited staging bound is one final device slice at a time, not one source
-file and not the entire ideal quarter-checkpoint. The largest planned range is
-the 79,298,560-byte BF16 LM-head slice. Loading every text tensor would stream
-80,128,653,560 bytes (74.626 GiB) per host under the initial policy; large
-payloads are downloaded once across the slice, while small replicated tensors
-and scale grids are intentionally read by each host.
+The raw-tensor staging bound is one final device slice at a time, not one
+source file and not the entire ideal quarter-checkpoint. The largest raw range
+is the 79,298,560-byte BF16 LM-head slice. Executable expert packing raises the
+actual peak device staging buffer to 150,994,944 bytes because 288 independently
+named expert slices must form one local array. Loading every text tensor would
+stream 80,128,653,560 bytes (74.626 GiB) per host under the initial policy;
+large payloads are downloaded once across the slice, while small replicated
+tensors and scale grids are intentionally read by each host.
 
 ## Initial adapter surface
 
@@ -94,7 +96,9 @@ Current branch status:
 | G2 reduced architecture parity | passed | commit `1ca6ccf`; [`glm53_reduced_hybrid_cpu_parity.json`](../results/glm53_reduced_hybrid_cpu_parity.json) |
 | G3 block-FP8 primitive on v4 | passed | commit `2bfda04`; [`glm53_fp8_v4_probe.json`](../results/glm53_fp8_v4_probe.json) |
 | G4 direct sharded loader | passed | commit `fb08fcc`; [`glm53_direct_sharded_loader_v4.json`](../results/glm53_direct_sharded_loader_v4.json), [`glm53_checkpoint_header_audit.json`](../results/glm53_checkpoint_header_audit.json) |
-| G5 full frozen forward | pending | next gate; whole-model path/HBM unproven |
+| G5a executable tensor schema | passed | commit `5653518`; [`glm53_execution_schema_audit.json`](../results/glm53_execution_schema_audit.json) |
+| G5b official-size expert kernel | pending | next gate; packed expert HBM/temporary unmeasured |
+| G5c full frozen forward | pending | whole-model load/compile/HBM unproven |
 | G6 bounded LoRA SFT | pending | blocked by G5 |
 
 ### G0 — Metadata and static preflight
@@ -113,6 +117,7 @@ PYTHONPATH=src uv run python scripts/plan_glm53_lora.py \
   --index /path/to/model.safetensors.index.json \
   --kernel-evidence docs/results/glm53_fp8_v4_probe.json \
   --loader-evidence docs/results/glm53_direct_sharded_loader_v4.json \
+  --execution-schema-evidence docs/results/glm53_execution_schema_audit.json \
   --rank 8
 ```
 
@@ -181,10 +186,29 @@ GiB and the measured `/dev/shm` delta was zero. This passes bounded ordinary
 RAM staging and direct device placement. It does not claim explicit host-page
 pinning or a whole-model load.
 
-### G5 — Full frozen forward and HBM measurement
+### G5a — Executable tensor schema
 
-- Load the text-only base without adapters and execute short-sequence forward
-  passes at increasing lengths.
+- Derive source names and shapes from the architecture rather than trusting a
+  permissive state-dict walk.
+- Map every logical tensor and scale grid exactly once into a final executable
+  target, including 288-way expert packs.
+- Run the complete reduced hybrid model with source-oriented FP8 wrappers and
+  compare logits, loss, and LoRA gradients with independently dequantized dense
+  parameters.
+
+Measured result: all 37,534 logical tensors and 36,467 scale grids map exactly
+once to 1,372 executable targets. Of these, 305 are block-FP8 targets. The
+36,288 expert matrices form exactly 126 packs: gate, up, and down for each of
+42 sparse MLP layers. The full reduced quantized forward and adapter gradients
+match the dequantized dense path within the test tolerance. G5a does not load
+the full checkpoint or measure TPU memory.
+
+### G5b/G5c — Expert kernel and full frozen forward
+
+- Compile one official-size 288-expert layer first and reject a persistent BF16
+  expansion of the full expert bank or an unbounded selected-weight temporary.
+- Only after that probe passes, load the text-only base without adapters and
+  execute a one-token frozen forward before increasing length.
 - Measure compiled executable size, per-chip HBM, dequant workspace, collective
   buffers, throughput, and numerical comparison on fixed public prompts.
 - Replace the placeholder 8 GiB activation and 2 GiB runtime/dequant reserves

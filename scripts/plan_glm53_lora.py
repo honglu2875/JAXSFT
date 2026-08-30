@@ -307,6 +307,95 @@ def validate_loader_evidence(path: Path) -> dict:
     }
 
 
+def validate_execution_schema_evidence(path: Path) -> dict:
+    """Validate G5a's complete text-tensor to executable-target mapping."""
+
+    payload, payload_bytes = _load_unique_json(path, label="execution schema evidence")
+    mismatches: list[str] = []
+
+    def require(condition: bool, message: str) -> None:
+        if not condition:
+            mismatches.append(message)
+
+    source_revision = payload.get("source_revision")
+    require(payload.get("schema_version") == 1, "schema_version must be 1")
+    require(payload.get("test") == "glm53_g5_execution_schema_audit", "unexpected test identity")
+    require(
+        isinstance(source_revision, str)
+        and len(source_revision) == 40
+        and all(character in "0123456789abcdef" for character in source_revision),
+        "source_revision must be a full lowercase Git hash",
+    )
+    model = payload.get("model", {})
+    require(model.get("repo_id") == OFFICIAL_CHECKPOINT.repo_id, "model repo mismatch")
+    require(model.get("revision") == OFFICIAL_CHECKPOINT.revision, "model revision mismatch")
+    require(model.get("config_sha256") == OFFICIAL_CHECKPOINT.config_sha256, "config hash mismatch")
+    require(model.get("index_sha256") == OFFICIAL_CHECKPOINT.index_sha256, "index hash mismatch")
+    require(model.get("text_payload_bytes") == 319_706_118_392, "text payload bytes mismatch")
+    coverage = payload.get("coverage", {})
+    require(coverage.get("logical_tensor_count") == 37_534, "logical tensor count mismatch")
+    require(coverage.get("scale_tensor_count") == 36_467, "scale tensor count mismatch")
+    require(coverage.get("text_tensor_count") == 74_001, "text tensor count mismatch")
+    require(coverage.get("header_network_bytes") == 10_684_096, "header byte count mismatch")
+    require(
+        coverage.get("mapping_sha256")
+        == "be4e5e87c71f8f51c65d41cd1f57e6cd1e0b90f7e37367b9eddce852c8112b36",
+        "execution mapping digest mismatch",
+    )
+    require(
+        coverage.get("all_text_tensors_mapped_exactly_once") is True,
+        "execution mapping coverage is incomplete",
+    )
+    execution = payload.get("execution", {})
+    require(execution.get("target_group_count") == 1_372, "executable target count mismatch")
+    require(execution.get("quantized_target_group_count") == 305, "quantized target count mismatch")
+    require(
+        execution.get("role_counts")
+        == {
+            "dense_transpose": 494,
+            "depthwise_conv": 102,
+            "direct_array": 471,
+            "fp8_expert_pack": 36_288,
+            "fp8_linear": 179,
+        },
+        "execution role counts mismatch",
+    )
+    require(execution.get("scale_payload_bytes") == 74_956_800, "scale payload bytes mismatch")
+    packing = payload.get("expert_packing", {})
+    require(packing.get("group_count") == 126, "expert pack group count mismatch")
+    require(
+        packing.get("group_counts_by_projection") == {"down": 42, "gate": 42, "up": 42},
+        "expert projection pack counts mismatch",
+    )
+    require(
+        packing.get("groups_sha256")
+        == "a1677002f0a90fb025bd4df36720eb1abcd0890e25cdd7586d24d96023a3f2c3",
+        "expert pack manifest digest mismatch",
+    )
+    require(packing.get("source_bytes") == 304_405_807_104, "expert source byte count mismatch")
+    require(packing.get("per_device_bytes") == 19_025_362_944, "expert device byte count mismatch")
+    require(
+        packing.get("maximum_device_staging_buffer_bytes") == 150_994_944,
+        "expert staging buffer bound mismatch",
+    )
+    require(
+        packing.get("all_groups_cover_experts_exactly_once") is True,
+        "expert pack coverage is incomplete",
+    )
+    gate = payload.get("gate", {})
+    require(gate.get("g5a_execution_schema") == "passed", "G5a is not marked passed")
+    require(gate.get("full_model_runnable") is False, "G5a must not claim a runnable model")
+    if mismatches:
+        raise ValueError("invalid GLM-5.3 execution schema evidence: " + "; ".join(mismatches))
+    return {
+        "path": str(path),
+        "sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        "source_revision": source_revision,
+        "test": payload["test"],
+        "staging_per_host_bytes": packing["maximum_device_staging_buffer_bytes"],
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True, help="pinned config.json")
@@ -327,6 +416,11 @@ def main() -> int:
         type=Path,
         help="tracked G4 JSON evidence; validated with its sibling header audit",
     )
+    parser.add_argument(
+        "--execution-schema-evidence",
+        type=Path,
+        help="tracked G5a JSON evidence covering every text tensor and expert pack",
+    )
     args = parser.parse_args()
 
     config_hash = _sha256(args.config)
@@ -339,6 +433,16 @@ def main() -> int:
     index.verify(OFFICIAL_CHECKPOINT)
     kernel_evidence = validate_kernel_evidence(args.kernel_evidence) if args.kernel_evidence else None
     loader_evidence = validate_loader_evidence(args.loader_evidence) if args.loader_evidence else None
+    schema_evidence = (
+        validate_execution_schema_evidence(args.execution_schema_evidence)
+        if args.execution_schema_evidence
+        else None
+    )
+    staging_bounds = [
+        evidence["staging_per_host_bytes"]
+        for evidence in (loader_evidence, schema_evidence)
+        if evidence is not None
+    ]
     plan = v4_32_lora_preflight(
         config,
         index,
@@ -346,10 +450,11 @@ def main() -> int:
         execution_weight_format=args.execution_weight_format,
         executable_kernel_proven=kernel_evidence is not None,
         direct_loader_proven=loader_evidence is not None,
+        execution_schema_proven=schema_evidence is not None,
         placed_base_per_device_bytes=(
             loader_evidence["placed_base_per_device_bytes"] if loader_evidence else None
         ),
-        staging_per_host_bytes=loader_evidence["staging_per_host_bytes"] if loader_evidence else None,
+        staging_per_host_bytes=max(staging_bounds) if staging_bounds else None,
     )
     payload = {
         "schema_version": 1,
@@ -365,10 +470,15 @@ def main() -> int:
             "source_shard_count": index.shard_count,
         },
         "preflight": _with_gib_fields(plan.to_dict()),
-        "evidence": {"kernel": kernel_evidence, "direct_loader": loader_evidence},
+        "evidence": {
+            "kernel": kernel_evidence,
+            "direct_loader": loader_evidence,
+            "execution_schema": schema_evidence,
+        },
         "warning": (
-            "G3/G4 evidence proves one real block-FP8 contraction and bounded direct sharding, not the "
-            "full model; runnable remains false until the whole-model forward/HBM gate passes"
+            "G3/G4/G5a evidence proves a real block-FP8 contraction, bounded direct sharding, and "
+            "complete schema coverage, not the full model; runnable remains false until the "
+            "whole-model forward/HBM gate passes"
         ),
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
