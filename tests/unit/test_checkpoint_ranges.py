@@ -193,3 +193,48 @@ def test_pooled_range_reader_rejects_ignored_range_before_body_read():
         reader.resolve()
     assert response.raw.read_calls == []
     reader.close()
+
+
+def test_pooled_range_reader_refreshes_an_expired_signed_url_once():
+    origin = "https://example.test/model.safetensors"
+    expired = "https://cdn.example.test/expired"
+    renewed = "https://cdn.example.test/renewed"
+    calls = []
+    expired_response = _RequestsStyleResponse(
+        status=403,
+        headers={},
+        payload=b"must not be read",
+        url=expired,
+    )
+    responses = [
+        _RequestsStyleResponse(
+            status=206,
+            headers={"Content-Range": "bytes 0-0/100", "Content-Length": "1"},
+            payload=b"a",
+            url=expired,
+        ),
+        expired_response,
+        _RequestsStyleResponse(
+            status=206,
+            headers={"Content-Range": "bytes 0-0/100", "Content-Length": "1"},
+            payload=b"a",
+            url=renewed,
+        ),
+        _RequestsStyleResponse(
+            status=206,
+            headers={"Content-Range": "bytes 10-13/100", "Content-Length": "4"},
+            payload=b"bcde",
+            url=renewed,
+        ),
+    ]
+    session = _Session(responses, calls)
+    reader = StrictPooledHTTPRangeReader(
+        origin,
+        connections=1,
+        session_factory=lambda: session,
+    )
+    assert reader.read(10, 13) == b"bcde"
+    assert [call[0] for call in calls] == [origin, expired, origin, renewed]
+    assert expired_response.raw.read_calls == []
+    assert reader.bytes_read == 6
+    reader.close()

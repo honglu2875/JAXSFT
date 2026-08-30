@@ -155,6 +155,10 @@ class _RequestsSession(Protocol):
     def close(self) -> None: ...
 
 
+class _ResolvedURLExpired(Exception):
+    pass
+
+
 class StrictPooledHTTPRangeReader:
     """Thread-safe strict range reader with bounded persistent connections.
 
@@ -176,6 +180,7 @@ class StrictPooledHTTPRangeReader:
         timeout_seconds: float = 60.0,
         maximum_request_bytes: int = 768 * 1024 * 1024,
         connections: int = 16,
+        maximum_attempts: int = 4,
         headers: Mapping[str, str] | None = None,
         session_factory: Callable[[], _RequestsSession] = requests.Session,
     ) -> None:
@@ -185,6 +190,12 @@ class StrictPooledHTTPRangeReader:
             raise ValueError("range timeout and maximum request size must be positive")
         if isinstance(connections, bool) or not isinstance(connections, int) or connections <= 0:
             raise ValueError("range connection count must be a positive integer")
+        if (
+            isinstance(maximum_attempts, bool)
+            or not isinstance(maximum_attempts, int)
+            or maximum_attempts <= 0
+        ):
+            raise ValueError("range attempt count must be a positive integer")
         supplied_headers = dict(headers or {})
         reserved = {name.lower() for name in supplied_headers} & {"range", "accept-encoding"}
         if reserved:
@@ -193,15 +204,28 @@ class StrictPooledHTTPRangeReader:
         self.timeout_seconds = timeout_seconds
         self.maximum_request_bytes = maximum_request_bytes
         self.connections = connections
+        self.maximum_attempts = maximum_attempts
         self._headers = supplied_headers
         self._sessions: queue.LifoQueue[_RequestsSession] = queue.LifoQueue(connections)
         for _ in range(connections):
             session = session_factory()
             if isinstance(session, requests.Session):
+                retry = requests.adapters.Retry(
+                    total=maximum_attempts - 1,
+                    connect=maximum_attempts - 1,
+                    read=maximum_attempts - 1,
+                    status=maximum_attempts - 1,
+                    other=maximum_attempts - 1,
+                    allowed_methods=frozenset({"GET"}),
+                    status_forcelist=(429, 500, 502, 503, 504),
+                    backoff_factor=0.5,
+                    respect_retry_after_header=True,
+                    raise_on_status=False,
+                )
                 adapter = requests.adapters.HTTPAdapter(
                     pool_connections=1,
                     pool_maxsize=1,
-                    max_retries=0,
+                    max_retries=retry,
                     pool_block=True,
                 )
                 session.mount("https://", adapter)
@@ -280,6 +304,8 @@ class StrictPooledHTTPRangeReader:
                 allow_redirects=allow_redirects,
             )
             status = response.status_code
+            if not allow_redirects and status in {401, 403}:
+                raise _ResolvedURLExpired
             if status != 206:
                 raise ValueError(
                     f"range server returned HTTP {status}, expected 206; body was not read"
@@ -331,33 +357,48 @@ class StrictPooledHTTPRangeReader:
             )
         return payload, final_url
 
+    def _resolve_locked(self) -> None:
+        with self._state_lock:
+            if self._resolved_url is not None:
+                return
+        _, final_url = self._read_from(self.url, 0, 0, allow_redirects=True)
+        with self._state_lock:
+            self._resolved_url = final_url
+
     def resolve(self) -> None:
         """Resolve and cache the signed CDN URL using a one-byte range read."""
 
         with self._resolve_lock:
-            with self._state_lock:
-                if self._resolved_url is not None:
-                    return
-            _, final_url = self._read_from(self.url, 0, 0, allow_redirects=True)
-            with self._state_lock:
-                self._resolved_url = final_url
+            self._resolve_locked()
 
     def read(self, start: int, end: int) -> bytes:
         """Read inclusive interval ``[start, end]`` from the cached CDN URL."""
 
-        self.resolve()
-        with self._state_lock:
-            resolved_url = self._resolved_url
-        assert resolved_url is not None
-        payload, final_url = self._read_from(
-            resolved_url,
-            start,
-            end,
-            allow_redirects=False,
-        )
-        if final_url != resolved_url:
-            raise ValueError("resolved checkpoint URL unexpectedly redirected")
-        return payload
+        for attempt in range(2):
+            self.resolve()
+            with self._state_lock:
+                resolved_url = self._resolved_url
+            assert resolved_url is not None
+            try:
+                payload, final_url = self._read_from(
+                    resolved_url,
+                    start,
+                    end,
+                    allow_redirects=False,
+                )
+            except _ResolvedURLExpired:
+                if attempt:
+                    raise ValueError("resolved checkpoint URL expired again after refresh") from None
+                with self._resolve_lock:
+                    with self._state_lock:
+                        if self._resolved_url == resolved_url:
+                            self._resolved_url = None
+                    self._resolve_locked()
+                continue
+            if final_url != resolved_url:
+                raise ValueError("resolved checkpoint URL unexpectedly redirected")
+            return payload
+        raise AssertionError("unreachable range URL refresh path")
 
     def close(self) -> None:
         with self._state_lock:

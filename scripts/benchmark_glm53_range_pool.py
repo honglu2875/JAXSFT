@@ -124,7 +124,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 for expert_index, shard, byte_range, expected_bytes in work
             }
             for future in as_completed(futures):
-                expert_index, expected_bytes = futures[future]
+                expert_index, expected_bytes = futures.pop(future)
                 payload = future.result()
                 if len(payload) != expected_bytes:
                     raise ValueError(
