@@ -45,9 +45,11 @@ TPU v4 does not make the checkpoint's FP8 serialization directly executable by
 assumption. The G3 probe now demonstrates one real 1536x4096 block-FP8
 contraction with scale-aware 128x128 conversion and no full BF16/F32 weight in
 optimized HLO. This is kernel evidence, not a whole-model capacity result. The
-plan may mark `executable_kernel_proven: true`. The G4 proof now marks
-`direct_loader_proven: true`, but the plan remains `runnable: false` until the
-complete frozen model passes a sharded forward with measured HBM.
+plan may mark `executable_kernel_proven: true`, and the G4 proof marks
+`direct_loader_proven: true`. G5c2 now proves a complete frozen sharded
+one-token forward. A `runnable: true` preflight therefore means only that the
+next bounded G6 experiment is permitted; it does not mean that long-sequence
+SFT has passed its memory or throughput gates.
 
 The source files are serialization shards, not mesh/FSDP shards. Assigning one
 file to one host is therefore incorrect: a final tensor partition can require
@@ -99,8 +101,8 @@ Current branch status:
 | G5a executable tensor schema | passed | commit `5653518`; [`glm53_execution_schema_audit.json`](../results/glm53_execution_schema_audit.json) |
 | G5b official-size expert kernel | passed | commit `d2eb6c1`; [`glm53_expert_fp8_v4_probe.json`](../results/glm53_expert_fp8_v4_probe.json) |
 | G5c1 real checkpoint expert streaming | passed | commit `3869a9b`; [`glm53_real_expert_streaming_v4.json`](../results/glm53_real_expert_streaming_v4.json) |
-| G5c2 full frozen forward | pending | next gate; whole-model load/compile/HBM unproven |
-| G6 bounded LoRA SFT | pending | blocked by G5 |
+| G5c2 full frozen forward | passed | run commit `da5c6a7`; [`glm53_full_forward_v4.json`](../results/glm53_full_forward_v4.json) |
+| G6 bounded LoRA SFT | pending | capacity-bounded expert dispatch and full-model backward unproven |
 
 ### G0 — Metadata and static preflight
 
@@ -120,13 +122,15 @@ PYTHONPATH=src uv run python scripts/plan_glm53_lora.py \
   --loader-evidence docs/results/glm53_direct_sharded_loader_v4.json \
   --execution-schema-evidence docs/results/glm53_execution_schema_audit.json \
   --expert-kernel-evidence docs/results/glm53_expert_fp8_v4_probe.json \
+  --full-forward-evidence docs/results/glm53_full_forward_v4.json \
   --rank 8
 ```
 
-Expected result after G4: `static_fit: true`, `runnable: false` for
-`fp8_blockwise`, with 28.859 GiB provisionally used and 3.141 GiB free per
-chip. The sole evidence blocker is the unmeasured full frozen forward.
-`bfloat16` remains `static_fit: false`.
+Expected result with G5c2 evidence: `static_fit: true`, `runnable: true` for
+the next bounded G6 probe only. The planner uses the measured
+33,014,407,168-byte device limit rather than nominal 32 GiB; its deliberately
+conservative 8 GiB activation and 2 GiB runtime reserves leave about 1.89 GiB
+per chip. `bfloat16` remains `static_fit: false`.
 
 ### G1 — Generic LoRA correctness
 
@@ -239,10 +243,32 @@ absolute error under explicit 2%/`2e-5` cross-backend bounds; most of the
 relative error came from the near-zero logits sum. This validates real source
 assembly and one real expert contraction, not the complete model.
 
+Measured G5c2 result: all 1,372 executable targets (37,534 logical tensors and
+36,467 scale tensors) were streamed from the pinned 62-shard checkpoint onto
+the 16-chip mesh. Each host fetched 80,141,139,062 bytes through bounded HTTP
+ranges; the largest request was 79,298,560 bytes, maximum expert staging was
+603,979,776 bytes, maximum process HWM was 7,912,480,768 bytes, and measured
+RAMFS payload growth was zero. Every chip held the header-audited
+20,234,287,352-byte base.
+
+The compiled forward reported 20,262,202,880 argument bytes and 225,031,168
+temporary bytes per chip. Maximum observed device use was 20,303,898,624 of
+33,014,407,168 bytes, leaving 12,710,508,544 bytes of raw headroom and a
+12,558,333,440-byte largest free block. All ranks produced the same optimized
+HLO and output hashes; two executions on every rank were bitwise identical and
+finite. Maximum compilation time was 85.7 seconds. The steady one-token
+forward still took 123.6 seconds, so this implementation is correctness and
+capacity evidence, not a usable training kernel. The current selected-expert
+temporary and reference execution must be replaced by capacity-bounded,
+throughput-oriented dispatch before increasing token count.
+
 ### G6 — Bounded LoRA SFT
 
 - Start with rank 4/8, batch 1, short sequences, full rematerialization, and
   attention-only targets.
+- First compile a capacity-bounded dispatch/backward probe without the full
+  checkpoint; reject any temporary proportional to all experts or unbounded
+  `tokens * top_k` gathered weights.
 - Run 3 steps, restore from an adapter-only checkpoint, then run 10--50 steps if
   loss/gradient/HBM traces are stable.
 - Compare the reduced configuration trajectory against canonical
@@ -255,7 +281,8 @@ assembly and one real expert contraction, not the complete model.
 Stop before downloading the full checkpoint if any of these remains true:
 
 - a block-FP8 contraction cannot execute without persistent BF16 expansion;
-- measured base plus conservative training reserves exceeds 32 GiB per chip;
+- measured base plus conservative training reserves exceeds the reported
+  33,014,407,168-byte device limit;
 - final tensor shardings require a full tensor or model replica on any host;
 - the loader cannot prove complete key/scale coverage with bounded memory;
 - reduced float32 forward/backward parity fails or divergence grows across the
@@ -264,7 +291,7 @@ Stop before downloading the full checkpoint if any of these remains true:
   leaves.
 
 Passing G0 is permission to investigate G1/G2, not permission to fetch 305.8
-GiB of weights. G3 and G4 now justify a bounded G5 load, but not an unbounded
-download or a training run. G5 must materialize the text-only PyTree one range
-at a time, stop on memory pressure, and demonstrate a complete frozen forward
-before G6 allocates adapter optimizer state.
+GiB of weights. G3 and G4 justified the bounded G5 load, and G5c2 now permits
+work on G6. It does not permit a long-sequence training run: G6 must first
+bound expert dispatch, then measure adapter-only backward and optimizer HBM at
+the smallest token count before increasing sequence length or step count.

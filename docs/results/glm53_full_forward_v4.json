@@ -1,0 +1,87 @@
+{
+  "execution": {
+    "all_distributed_shutdowns_complete": true,
+    "all_optimized_hlo_equal": true,
+    "all_outputs_finite": true,
+    "all_rank_outputs_equal": true,
+    "base_bytes_per_device": 20234287352,
+    "compiler_argument_bytes_per_device": 20262202880,
+    "compiler_output_bytes_per_device": 512,
+    "compiler_temporary_bytes_per_device": 225031168,
+    "generated_code_bytes": 41561600,
+    "hbm_limit_bytes_per_device": 33014407168,
+    "headroom_after_peak_bytes_per_device": 12710508544,
+    "maximum_compile_seconds": 85.71106799691916,
+    "maximum_device_peak_bytes_in_use": 20303898624,
+    "maximum_elapsed_seconds": 1773.6944406619295,
+    "maximum_first_execute_seconds": 133.48866472486407,
+    "maximum_second_execute_seconds": 123.63487085397355,
+    "minimum_largest_free_block_after_execution_bytes": 12558333440,
+    "optimized_hlo_sha256": "3b116a177e03dc5372c03a471c6c99dd185134cad5a6572b4d4b503ad6bd1429",
+    "parameter_array_leaf_count": 1677,
+    "statistics": [
+      -46584.71875,
+      388708.03125,
+      8.375,
+      -8.0,
+      -0.30077943205833435,
+      0.96484375,
+      1.9140625,
+      0.765625,
+      -2.21875,
+      0.173828125,
+      0.08935546875,
+      -0.390625,
+      -2.421875,
+      -1.8828125
+    ],
+    "statistics_float32_sha256": "2d27e8296bffd4a841dabc1630408f9a6db30ca6930e889b75363a5cf977dc67",
+    "two_executions_bitwise_equal_on_every_rank": true
+  },
+  "gate": {
+    "bounded_lora_sft_runnable": false,
+    "full_model_frozen_forward_proven": true,
+    "g5c2_full_frozen_forward": "passed",
+    "remaining_blockers": [
+      "The selected-expert temporary still scales with tokens times top-k.",
+      "A capacity-bounded expert-dispatch kernel is required before long sequences.",
+      "Adapter backward, optimizer, loss, and update HBM remain unmeasured on the full model."
+    ]
+  },
+  "rank_result_sha256": [
+    "3103140be3dfe900aea25ea499ef03498c84ef7992ce96f47f43b82ea335a951",
+    "4e00d56ba7cbd5cb82ab01710784a44a9cac541e9c73f09562e54f2af58d0113",
+    "f8fa9e3f427340b8d87d190670cc81e17b5ef959849313ea292b82a1c8edf6a7",
+    "f7b8d196d143b93e88ae15e526cdedc6c7e939c6ba35f32a744e7d8e07311b96"
+  ],
+  "schema_version": 1,
+  "source_revision": "da5c6a708a75ab0b7f9ca56d13d377ebcc8f0eba",
+  "streaming": {
+    "largest_range_bytes": 79298560,
+    "loaded_logical_tensor_count": 37534,
+    "loaded_scale_tensor_count": 36467,
+    "loaded_target_count": 1372,
+    "maximum_expert_host_buffer_bytes": 603979776,
+    "maximum_load_seconds": 1426.771870780969,
+    "maximum_process_vmhwm_bytes": 7912480768,
+    "maximum_shm_used_delta_bytes": 0,
+    "network_bytes_across_hosts": 320564556248,
+    "network_bytes_per_host": 80141139062,
+    "prepared_shard_count": 62,
+    "requests_per_host_including_resolves": 38847
+  },
+  "test": "glm53_g5c2_complete_frozen_forward_acceptance",
+  "topology": {
+    "accelerator_type": "v4-32",
+    "global_device_count": 16,
+    "host_count": 4,
+    "physical_hostname_order_independent_of_process_index": true,
+    "physical_hostnames": [
+      "t1v-n-a09f5679-w-0",
+      "t1v-n-a09f5679-w-1",
+      "t1v-n-a09f5679-w-2",
+      "t1v-n-a09f5679-w-3"
+    ],
+    "process_count": 4
+  }
+}

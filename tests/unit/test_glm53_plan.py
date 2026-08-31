@@ -6,6 +6,7 @@ import pytest
 from scripts.plan_glm53_lora import (
     validate_execution_schema_evidence,
     validate_expert_kernel_evidence,
+    validate_full_forward_evidence,
     validate_kernel_evidence,
     validate_loader_evidence,
 )
@@ -83,3 +84,20 @@ def test_glm53_official_expert_evidence_enforces_hlo_and_memory_bounds(tmp_path)
     tampered.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="temporary"):
         validate_expert_kernel_evidence(tampered)
+
+
+def test_glm53_full_forward_evidence_enforces_output_and_memory_bounds(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    evidence_path = root / "docs" / "results" / "glm53_full_forward_v4.json"
+    validated = validate_full_forward_evidence(evidence_path)
+    assert validated["source_revision"] == "da5c6a708a75ab0b7f9ca56d13d377ebcc8f0eba"
+    assert validated["hbm_limit_per_device_bytes"] == 33_014_407_168
+    assert validated["measured_peak_per_device_bytes"] == 20_303_898_624
+    assert validated["measured_headroom_per_device_bytes"] == 12_710_508_544
+
+    payload = json.loads(evidence_path.read_text())
+    payload["execution"]["maximum_device_peak_bytes_in_use"] += 1
+    tampered = tmp_path / "full-forward.json"
+    tampered.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="peak"):
+        validate_full_forward_evidence(tampered)

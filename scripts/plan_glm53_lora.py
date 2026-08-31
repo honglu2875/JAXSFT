@@ -477,6 +477,156 @@ def validate_expert_kernel_evidence(path: Path) -> dict:
     }
 
 
+def validate_full_forward_evidence(path: Path) -> dict:
+    """Validate G5c2's complete frozen-model load, compile, and execution."""
+
+    payload, payload_bytes = _load_unique_json(path, label="full forward evidence")
+    mismatches: list[str] = []
+
+    def require(condition: bool, message: str) -> None:
+        if not condition:
+            mismatches.append(message)
+
+    source_revision = payload.get("source_revision")
+    require(payload.get("schema_version") == 1, "schema_version must be 1")
+    require(
+        payload.get("test") == "glm53_g5c2_complete_frozen_forward_acceptance",
+        "unexpected test identity",
+    )
+    require(
+        isinstance(source_revision, str)
+        and len(source_revision) == 40
+        and all(character in "0123456789abcdef" for character in source_revision),
+        "source_revision must be a full lowercase Git hash",
+    )
+    topology = payload.get("topology", {})
+    require(topology.get("accelerator_type") == "v4-32", "full-forward topology mismatch")
+    require(topology.get("host_count") == 4, "full-forward host count mismatch")
+    require(topology.get("process_count") == 4, "full-forward process count mismatch")
+    require(topology.get("global_device_count") == 16, "full-forward device count mismatch")
+    require(
+        topology.get("physical_hostname_order_independent_of_process_index") is True,
+        "full-forward host/rank order was not audited",
+    )
+    hostnames = topology.get("physical_hostnames")
+    require(
+        isinstance(hostnames, list) and len(hostnames) == 4 and len(set(hostnames)) == 4,
+        "full-forward physical host coverage mismatch",
+    )
+
+    streaming = payload.get("streaming", {})
+    expected_streaming = {
+        "prepared_shard_count": 62,
+        "loaded_logical_tensor_count": 37_534,
+        "loaded_scale_tensor_count": 36_467,
+        "loaded_target_count": 1_372,
+        "network_bytes_per_host": 80_141_139_062,
+        "network_bytes_across_hosts": 320_564_556_248,
+        "requests_per_host_including_resolves": 38_847,
+        "largest_range_bytes": 79_298_560,
+        "maximum_expert_host_buffer_bytes": 603_979_776,
+        "maximum_shm_used_delta_bytes": 0,
+    }
+    for name, expected in expected_streaming.items():
+        require(streaming.get(name) == expected, f"full-forward streaming {name} mismatch")
+    require(
+        isinstance(streaming.get("maximum_process_vmhwm_bytes"), int)
+        and 0 < streaming["maximum_process_vmhwm_bytes"] <= 10 * GIB,
+        "full-forward process high-water memory exceeds 10 GiB",
+    )
+    require(
+        isinstance(streaming.get("maximum_load_seconds"), (int, float))
+        and 0 < streaming["maximum_load_seconds"] <= 3_600,
+        "full-forward load duration is invalid",
+    )
+
+    execution = payload.get("execution", {})
+    expected_execution = {
+        "parameter_array_leaf_count": 1_677,
+        "base_bytes_per_device": 20_234_287_352,
+        "compiler_argument_bytes_per_device": 20_262_202_880,
+        "compiler_temporary_bytes_per_device": 225_031_168,
+        "compiler_output_bytes_per_device": 512,
+        "generated_code_bytes": 41_561_600,
+        "hbm_limit_bytes_per_device": 33_014_407_168,
+        "maximum_device_peak_bytes_in_use": 20_303_898_624,
+        "headroom_after_peak_bytes_per_device": 12_710_508_544,
+        "minimum_largest_free_block_after_execution_bytes": 12_558_333_440,
+        "statistics_float32_sha256": (
+            "2d27e8296bffd4a841dabc1630408f9a6db30ca6930e889b75363a5cf977dc67"
+        ),
+        "optimized_hlo_sha256": (
+            "3b116a177e03dc5372c03a471c6c99dd185134cad5a6572b4d4b503ad6bd1429"
+        ),
+    }
+    for name, expected in expected_execution.items():
+        require(execution.get(name) == expected, f"full-forward execution {name} mismatch")
+    for claim in (
+        "all_outputs_finite",
+        "two_executions_bitwise_equal_on_every_rank",
+        "all_rank_outputs_equal",
+        "all_optimized_hlo_equal",
+        "all_distributed_shutdowns_complete",
+    ):
+        require(execution.get(claim) is True, f"full-forward claim {claim} is not true")
+    for name in (
+        "maximum_compile_seconds",
+        "maximum_first_execute_seconds",
+        "maximum_second_execute_seconds",
+        "maximum_elapsed_seconds",
+    ):
+        require(
+            isinstance(execution.get(name), (int, float)) and 0 < execution[name] <= 4_000,
+            f"full-forward {name} is invalid",
+        )
+    require(
+        isinstance(execution.get("statistics"), list)
+        and len(execution["statistics"]) == 14
+        and all(isinstance(value, (int, float)) for value in execution["statistics"]),
+        "full-forward output statistics are malformed",
+    )
+
+    rank_hashes = payload.get("rank_result_sha256")
+    require(
+        isinstance(rank_hashes, list)
+        and len(rank_hashes) == 4
+        and len(set(rank_hashes)) == 4
+        and all(
+            isinstance(digest, str)
+            and len(digest) == 64
+            and all(character in "0123456789abcdef" for character in digest)
+            for digest in rank_hashes
+        ),
+        "full-forward raw rank result hashes are malformed",
+    )
+    gate = payload.get("gate", {})
+    require(gate.get("g5c2_full_frozen_forward") == "passed", "G5c2 is not marked passed")
+    require(
+        gate.get("full_model_frozen_forward_proven") is True,
+        "G5c2 does not prove the complete frozen forward",
+    )
+    require(
+        gate.get("bounded_lora_sft_runnable") is False,
+        "G5c2 evidence must not claim that bounded LoRA SFT already passed",
+    )
+    require(
+        isinstance(gate.get("remaining_blockers"), list) and len(gate["remaining_blockers"]) == 3,
+        "G5c2 remaining blockers are missing",
+    )
+    if mismatches:
+        raise ValueError("invalid GLM-5.3 full forward evidence: " + "; ".join(mismatches))
+    return {
+        "path": str(path),
+        "sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        "source_revision": source_revision,
+        "test": payload["test"],
+        "placed_base_per_device_bytes": execution["base_bytes_per_device"],
+        "hbm_limit_per_device_bytes": execution["hbm_limit_bytes_per_device"],
+        "measured_peak_per_device_bytes": execution["maximum_device_peak_bytes_in_use"],
+        "measured_headroom_per_device_bytes": execution["headroom_after_peak_bytes_per_device"],
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True, help="pinned config.json")
@@ -507,6 +657,11 @@ def main() -> int:
         type=Path,
         help="tracked G5b JSON evidence for one official-size packed expert layer",
     )
+    parser.add_argument(
+        "--full-forward-evidence",
+        type=Path,
+        help="tracked G5c2 JSON evidence for the complete frozen model",
+    )
     args = parser.parse_args()
 
     config_hash = _sha256(args.config)
@@ -529,6 +684,11 @@ def main() -> int:
         if args.expert_kernel_evidence
         else None
     )
+    full_forward_evidence = (
+        validate_full_forward_evidence(args.full_forward_evidence)
+        if args.full_forward_evidence
+        else None
+    )
     staging_bounds = [
         evidence["staging_per_host_bytes"]
         for evidence in (loader_evidence, schema_evidence)
@@ -539,12 +699,22 @@ def main() -> int:
         index,
         rank=args.rank,
         execution_weight_format=args.execution_weight_format,
+        hbm_per_device_bytes=(
+            full_forward_evidence["hbm_limit_per_device_bytes"]
+            if full_forward_evidence
+            else 32 * GIB
+        ),
         executable_kernel_proven=kernel_evidence is not None,
         direct_loader_proven=loader_evidence is not None,
         execution_schema_proven=schema_evidence is not None,
         official_expert_kernel_proven=expert_evidence is not None,
+        full_model_forward_proven=full_forward_evidence is not None,
         placed_base_per_device_bytes=(
-            loader_evidence["placed_base_per_device_bytes"] if loader_evidence else None
+            full_forward_evidence["placed_base_per_device_bytes"]
+            if full_forward_evidence
+            else loader_evidence["placed_base_per_device_bytes"]
+            if loader_evidence
+            else None
         ),
         staging_per_host_bytes=max(staging_bounds) if staging_bounds else None,
     )
@@ -567,11 +737,12 @@ def main() -> int:
             "direct_loader": loader_evidence,
             "execution_schema": schema_evidence,
             "expert_kernel": expert_evidence,
+            "full_forward": full_forward_evidence,
         },
         "warning": (
-            "G3/G4/G5a/G5b evidence proves real block-FP8 contractions, bounded direct sharding, "
-            "complete schema coverage, and one official-size expert layer, not the full model; "
-            "runnable remains false until the whole-model forward/HBM gate passes"
+            "A true preflight runnable value permits only the next bounded G6 experiment. "
+            "G5c2 proves the complete frozen one-token forward, not long-sequence expert dispatch, "
+            "adapter backward, optimizer state, loss, or an SFT update."
         ),
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
