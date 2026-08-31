@@ -307,6 +307,20 @@ class Glm53StreamingLoader(AbstractContextManager["Glm53StreamingLoader"]):
         if set(self._shard_headers) != set(self.index.shard_names):
             raise ValueError("complete text preparation did not cover all checkpoint shards")
 
+    def prepare_headers_all(self) -> None:
+        """Fetch and validate every shard header without reading tensor payloads.
+
+        This is the cheap first half of :meth:`prepare_all`.  It exists so a
+        compile-only capacity probe can construct the exact sharded abstract
+        PyTree before the much more expensive checkpoint payload stream is
+        authorized.
+        """
+
+        for shard in self.index.shard_names:
+            self._prepare_shard(shard)
+        if set(self._shard_headers) != set(self.index.shard_names):
+            raise ValueError("complete header preparation did not cover all checkpoint shards")
+
     def _tensor(self, name: str) -> tuple[str, SafetensorsTensorRange]:
         try:
             shard = self._weight_map[name]
@@ -518,6 +532,59 @@ class Glm53StreamingLoader(AbstractContextManager["Glm53StreamingLoader"]):
             scales = ()
         return LoadedTarget(spec.target_path, value, (spec.source_name,), scales)
 
+    def _abstract_single_target(
+        self,
+        spec: Glm53CheckpointTensorSpec,
+    ) -> LoadedTarget:
+        """Describe one final target without allocating host or device payloads."""
+
+        shard, tensor = self._tensor(spec.source_name)
+        del shard
+        if tensor.shape != spec.source_shape:
+            raise ValueError(
+                f"source shape for {spec.source_name!r} is {tensor.shape}, expected {spec.source_shape}"
+            )
+        if tensor.dtype == "F8_E4M3":
+            if len(tensor.shape) != 2 or any(size % 128 for size in tensor.shape):
+                raise ValueError(f"FP8 tensor {tensor.name!r} is not a 128x128-blocked matrix")
+            bit_sharding = (
+                self._final_sharding(spec, source_oriented=True)
+                if _is_axis0_sharded(tensor)
+                else self._replicated_sharding()
+            )
+            bits = jax.ShapeDtypeStruct(tensor.shape, jnp.uint8, sharding=bit_sharding)
+            scale_name = _scale_name(tensor.name)
+            _, scale = self._tensor(scale_name)
+            expected_scale_shape = tuple(size // block for size, block in zip(tensor.shape, _BLOCK_SHAPE))
+            if scale.dtype != "F32" or scale.shape != expected_scale_shape:
+                raise ValueError(
+                    f"scale {scale_name!r} has {scale.dtype}{scale.shape}, "
+                    f"expected F32{expected_scale_shape}"
+                )
+            scale_value = jax.ShapeDtypeStruct(
+                scale.shape,
+                jnp.float32,
+                sharding=self._replicated_sharding(),
+            )
+            value = BlockFP8LinearKernel(bits, scale_value, compute_dtype=jnp.bfloat16)
+            scales = (scale_name,)
+        else:
+            unexpected_scale = _scale_name(spec.source_name)
+            if unexpected_scale in self._weight_map:
+                raise ValueError(f"non-FP8 tensor {spec.source_name!r} has a scale companion")
+            try:
+                dtype = {"BF16": jnp.bfloat16, "F32": jnp.float32}[tensor.dtype]
+            except KeyError as error:
+                raise ValueError(f"unsupported abstract tensor dtype {tensor.dtype!r}") from error
+            sharding = (
+                self._final_sharding(spec, source_oriented=False)
+                if _is_axis0_sharded(tensor)
+                else self._replicated_sharding()
+            )
+            value = jax.ShapeDtypeStruct(_target_shape(spec), dtype, sharding=sharding)
+            scales = ()
+        return LoadedTarget(spec.target_path, value, (spec.source_name,), scales)
+
     def _expert_host_layout(
         self,
         shape: tuple[int, int, int],
@@ -652,6 +719,53 @@ class Glm53StreamingLoader(AbstractContextManager["Glm53StreamingLoader"]):
             tuple(scale_names),
         )
 
+    def _abstract_expert_target(
+        self,
+        specs: Sequence[Glm53CheckpointTensorSpec],
+    ) -> LoadedTarget:
+        """Describe one packed expert bank with the loader's final shardings."""
+
+        ordered = sorted(specs, key=lambda spec: -1 if spec.pack_index is None else spec.pack_index)
+        if [spec.pack_index for spec in ordered] != list(range(self.config.n_routed_experts)):
+            raise ValueError(f"expert target {_format_path(specs[0].target_path)!r} is incomplete")
+        if len({spec.source_shape for spec in ordered}) != 1:
+            raise ValueError("expert target combines different source shapes")
+        source_shape = ordered[0].source_shape
+        if len(source_shape) != 2 or any(size % 128 for size in source_shape):
+            raise ValueError("expert sources must be rank-two 128x128-blocked matrices")
+        experts = len(ordered)
+        rows, columns = source_shape
+        logical_names: list[str] = []
+        scale_names: list[str] = []
+        for spec in ordered:
+            _, tensor = self._tensor(spec.source_name)
+            if tensor.dtype != "F8_E4M3" or tensor.shape != source_shape:
+                raise ValueError(f"invalid expert source metadata for {spec.source_name!r}")
+            scale_name = _scale_name(spec.source_name)
+            _, scale = self._tensor(scale_name)
+            expected_scale_shape = (rows // 128, columns // 128)
+            if scale.dtype != "F32" or scale.shape != expected_scale_shape:
+                raise ValueError(f"invalid expert scale metadata for {scale_name!r}")
+            logical_names.append(spec.source_name)
+            scale_names.append(scale_name)
+        bits = jax.ShapeDtypeStruct(
+            (experts, rows, columns),
+            jnp.uint8,
+            sharding=NamedSharding(self.mesh, PartitionSpec(None, "model", None)),
+        )
+        scales = jax.ShapeDtypeStruct(
+            (experts, rows // 128, columns // 128),
+            jnp.float32,
+            sharding=self._replicated_sharding(),
+        )
+        value = BatchedBlockFP8LinearKernel(bits, scales, compute_dtype=jnp.bfloat16)
+        return LoadedTarget(
+            ordered[0].target_path,
+            value,
+            tuple(logical_names),
+            tuple(scale_names),
+        )
+
     def target_groups(
         self,
     ) -> tuple[tuple[tuple[str | int, ...], tuple[Glm53CheckpointTensorSpec, ...]], ...]:
@@ -743,6 +857,49 @@ class Glm53StreamingLoader(AbstractContextManager["Glm53StreamingLoader"]):
             raise ValueError("complete streaming load did not consume every text scale tensor once")
         if len(values) != 1372:
             raise ValueError(f"complete streaming tree has {len(values)} targets, expected 1372")
+        return self._assemble_tree(values)
+
+    def abstract_parameters(self) -> dict[str, Any]:
+        """Return the exact final sharded parameter signature from headers only.
+
+        The returned leaves are ``ShapeDtypeStruct`` objects (inside the FP8
+        wrappers where applicable).  They are suitable for ``jit.lower`` and
+        compile-time memory analysis, but cannot be executed.  No checkpoint
+        tensor or scale payload is fetched by this method.
+        """
+
+        groups = self.target_groups()
+        self.prepare_headers_all()
+        values: dict[tuple[str | int, ...], Any] = {}
+        logical_names: set[str] = set()
+        scale_names: set[str] = set()
+        for path, specs in groups:
+            if specs[0].transform != "expert_transpose" and len(specs) != 1:
+                raise ValueError(f"non-expert abstract target {_format_path(path)!r} has multiple sources")
+            loaded = (
+                self._abstract_expert_target(specs)
+                if specs[0].transform == "expert_transpose"
+                else self._abstract_single_target(specs[0])
+            )
+            if loaded.path != path:
+                raise AssertionError("abstract target path changed during construction")
+            if logical_names.intersection(loaded.logical_source_names) or scale_names.intersection(
+                loaded.scale_source_names
+            ):
+                raise ValueError("abstract parameter signature repeats source tensors")
+            logical_names.update(loaded.logical_source_names)
+            scale_names.update(loaded.scale_source_names)
+            values[path] = loaded.value
+        expected_logical = {spec.source_name for spec in checkpoint_text_tensor_specs(self.config)}
+        expected_scales = {
+            _scale_name(name)
+            for name in expected_logical
+            if self._headers[name][1].dtype == "F8_E4M3"
+        }
+        if logical_names != expected_logical or scale_names != expected_scales:
+            raise ValueError("abstract parameter signature does not cover every text tensor once")
+        if len(values) != 1372:
+            raise ValueError(f"complete abstract tree has {len(values)} targets, expected 1372")
         return self._assemble_tree(values)
 
     def release_host_cache(self) -> None:
