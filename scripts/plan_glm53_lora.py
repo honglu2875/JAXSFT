@@ -627,6 +627,114 @@ def validate_full_forward_evidence(path: Path) -> dict:
     }
 
 
+def validate_bounded_expert_evidence(path: Path) -> dict:
+    """Validate G6a's assignment-independent expert input-gradient workspace."""
+
+    payload, payload_bytes = _load_unique_json(path, label="bounded expert evidence")
+    mismatches: list[str] = []
+
+    def require(condition: bool, message: str) -> None:
+        if not condition:
+            mismatches.append(message)
+
+    source_revision = payload.get("source_revision")
+    require(payload.get("schema_version") == 1, "schema_version must be 1")
+    require(
+        payload.get("test") == "glm53_g6a_bounded_expert_forward_backward_acceptance",
+        "unexpected test identity",
+    )
+    require(
+        isinstance(source_revision, str)
+        and len(source_revision) == 40
+        and all(character in "0123456789abcdef" for character in source_revision),
+        "source_revision must be a full lowercase Git hash",
+    )
+    require(
+        payload.get("topology")
+        == {
+            "accelerator_type": "v4-32",
+            "global_device_count": 16,
+            "host_count": 4,
+            "process_count": 4,
+        },
+        "bounded expert topology mismatch",
+    )
+    expert = payload.get("expert", {})
+    expected_scalars = {
+        "experts": 288,
+        "hidden_size": 4096,
+        "moe_intermediate_size": 2048,
+        "top_k": 8,
+        "source_fp8_bytes": 7_247_757_312,
+        "source_fp8_bytes_per_device": 452_984_832,
+        "selected_weight_batch_size": 1,
+        "maximum_dequantized_weight_bytes_per_projection_global": 16_777_216,
+        "maximum_dequantized_weight_bytes_per_projection_per_device": 1_048_576,
+        "one_token_assignment_count": 8,
+        "four_token_assignment_count": 32,
+        "one_token_compiler_temporary_bytes_per_device": 774_144,
+        "four_token_compiler_temporary_bytes_per_device": 741_888,
+        "maximum_device_peak_bytes_in_use": 460_946_432,
+        "maximum_process_vmhwm_bytes": 6_720_667_648,
+        "maximum_shm_used_delta_bytes": 0,
+    }
+    for name, expected in expected_scalars.items():
+        require(expert.get(name) == expected, f"bounded expert {name} mismatch")
+    require(expert.get("block_shape") == [128, 128], "bounded expert block shape mismatch")
+    require(expert.get("backward_chunk_rematerialized") is True, "bounded chunk is not rematerialized")
+    for claim in (
+        "weight_workspace_independent_of_token_count",
+        "compiler_temporary_did_not_grow_with_assignments",
+        "no_assignment_wide_dense_weight_in_optimized_hlo",
+        "all_rank_outputs_equal",
+        "all_rank_hlo_equal",
+        "all_distributed_shutdowns_complete",
+    ):
+        require(expert.get(claim) is True, f"bounded expert claim {claim} is not true")
+    require(
+        expert.get("optimized_hlo_sha256_by_token_count")
+        == {
+            "1": "192c994184c605154bd62fd66f639b9cab9b6572f33238e392848e849bf5b850",
+            "4": "8f6a7a7d691ec5bb7f0bdca709d7de4f012bd61514f18338bc3ed0ec3da60172",
+        },
+        "bounded expert optimized HLO hashes mismatch",
+    )
+    require(
+        expert.get("statistics_float32_sha256_by_token_count")
+        == {
+            "1": "405fdfb2c9a73568ed3b9297db98d50737e9f6285a7111b974b6c12a9c5a6eac",
+            "4": "dd21c6d661268dab5814d45c2627a7c5b3136a710848dca4c6fae62ccfc31873",
+        },
+        "bounded expert output hashes mismatch",
+    )
+    rank_hashes = payload.get("rank_result_sha256")
+    require(
+        isinstance(rank_hashes, list)
+        and len(rank_hashes) == 4
+        and len(set(rank_hashes)) == 4
+        and all(isinstance(digest, str) and len(digest) == 64 for digest in rank_hashes),
+        "bounded expert raw rank hashes are malformed",
+    )
+    gate = payload.get("gate", {})
+    require(
+        gate.get("g6a_bounded_expert_input_gradient") == "passed",
+        "G6a is not marked passed",
+    )
+    require(
+        gate.get("full_model_lora_step_runnable") is False,
+        "G6a must not claim a runnable full-model LoRA step",
+    )
+    if mismatches:
+        raise ValueError("invalid GLM-5.3 bounded expert evidence: " + "; ".join(mismatches))
+    return {
+        "path": str(path),
+        "sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        "source_revision": source_revision,
+        "test": payload["test"],
+        "maximum_device_peak_bytes_in_use": expert["maximum_device_peak_bytes_in_use"],
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True, help="pinned config.json")
@@ -662,6 +770,11 @@ def main() -> int:
         type=Path,
         help="tracked G5c2 JSON evidence for the complete frozen model",
     )
+    parser.add_argument(
+        "--bounded-expert-evidence",
+        type=Path,
+        help="tracked G6a JSON evidence for bounded expert input gradients",
+    )
     args = parser.parse_args()
 
     config_hash = _sha256(args.config)
@@ -687,6 +800,11 @@ def main() -> int:
     full_forward_evidence = (
         validate_full_forward_evidence(args.full_forward_evidence)
         if args.full_forward_evidence
+        else None
+    )
+    bounded_expert_evidence = (
+        validate_bounded_expert_evidence(args.bounded_expert_evidence)
+        if args.bounded_expert_evidence
         else None
     )
     staging_bounds = [
@@ -738,11 +856,13 @@ def main() -> int:
             "execution_schema": schema_evidence,
             "expert_kernel": expert_evidence,
             "full_forward": full_forward_evidence,
+            "bounded_expert_input_gradient": bounded_expert_evidence,
         },
         "warning": (
             "A true preflight runnable value permits only the next bounded G6 experiment. "
-            "G5c2 proves the complete frozen one-token forward, not long-sequence expert dispatch, "
-            "adapter backward, optimizer state, loss, or an SFT update."
+            "G5c2 proves the complete frozen one-token forward and G6a can prove an isolated "
+            "bounded expert input gradient; neither proves complete-model adapter backward, "
+            "optimizer state, loss, or an SFT update."
         ),
     }
     print(json.dumps(payload, indent=2, sort_keys=True))

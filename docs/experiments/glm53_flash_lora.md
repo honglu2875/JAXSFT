@@ -102,7 +102,10 @@ Current branch status:
 | G5b official-size expert kernel | passed | commit `d2eb6c1`; [`glm53_expert_fp8_v4_probe.json`](../results/glm53_expert_fp8_v4_probe.json) |
 | G5c1 real checkpoint expert streaming | passed | commit `3869a9b`; [`glm53_real_expert_streaming_v4.json`](../results/glm53_real_expert_streaming_v4.json) |
 | G5c2 full frozen forward | passed | run commit `da5c6a7`; [`glm53_full_forward_v4.json`](../results/glm53_full_forward_v4.json) |
-| G6 bounded LoRA SFT | pending | capacity-bounded expert dispatch and full-model backward unproven |
+| G6a bounded expert input gradient | passed | run commit `ed28e50`; [`glm53_bounded_expert_v4.json`](../results/glm53_bounded_expert_v4.json) |
+| G6b full-model attention-LoRA backward | pending | bounded primitive not yet wired into the complete model |
+| G6c loss/update/checkpoint, 3 steps | pending | blocked by G6b HBM gate |
+| G6d 10--50 step stability | pending | blocked by G6c |
 
 ### G0 — Metadata and static preflight
 
@@ -123,6 +126,7 @@ PYTHONPATH=src uv run python scripts/plan_glm53_lora.py \
   --execution-schema-evidence docs/results/glm53_execution_schema_audit.json \
   --expert-kernel-evidence docs/results/glm53_expert_fp8_v4_probe.json \
   --full-forward-evidence docs/results/glm53_full_forward_v4.json \
+  --bounded-expert-evidence docs/results/glm53_bounded_expert_v4.json \
   --rank 8
 ```
 
@@ -275,6 +279,20 @@ throughput-oriented dispatch before increasing token count.
   Transformers/Accelerate. For the full quantized model, track finite loss,
   gradient norm, router statistics, memory slope, and post-update drift; exact
   backend parity is not assumed.
+
+Measured G6a result: the correctness-first bounded primitive processes a
+static one-matrix selected-weight chunk inside `lax.map` and rematerializes the
+chunk for input-gradient computation. One official 288-expert gate/up/down
+bank was held in its final 16-way sharding while compiling forward plus input
+gradient at one token (8 assignments) and four tokens (32 assignments).
+Compiler temporary memory was 774,144 and 741,888 bytes per chip respectively:
+it did not grow with four times as many routed assignments. Optimized HLO
+contained the local one-matrix chunk shapes and no assignment-wide dense
+weight shape. Maximum device use was 460,946,432 bytes, maximum process HWM
+was 6,720,667,648 bytes, and RAMFS growth was zero. Four-token forward plus
+input gradient completed in at most 0.133 seconds across ranks. This passes the
+expert input-gradient primitive only; it does not yet measure a complete-model
+adapter gradient or optimizer update.
 
 ## Stop conditions
 

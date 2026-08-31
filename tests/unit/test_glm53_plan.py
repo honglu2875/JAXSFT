@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from scripts.plan_glm53_lora import (
+    validate_bounded_expert_evidence,
     validate_execution_schema_evidence,
     validate_expert_kernel_evidence,
     validate_full_forward_evidence,
@@ -101,3 +102,18 @@ def test_glm53_full_forward_evidence_enforces_output_and_memory_bounds(tmp_path)
     tampered.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="peak"):
         validate_full_forward_evidence(tampered)
+
+
+def test_glm53_bounded_expert_evidence_does_not_overclaim_full_step(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    evidence_path = root / "docs" / "results" / "glm53_bounded_expert_v4.json"
+    validated = validate_bounded_expert_evidence(evidence_path)
+    assert validated["source_revision"] == "ed28e5001876b3368374cc0456b0fa9476f0db1f"
+    assert validated["maximum_device_peak_bytes_in_use"] == 460_946_432
+
+    payload = json.loads(evidence_path.read_text())
+    payload["gate"]["full_model_lora_step_runnable"] = True
+    tampered = tmp_path / "bounded-expert.json"
+    tampered.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="must not claim"):
+        validate_bounded_expert_evidence(tampered)

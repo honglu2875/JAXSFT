@@ -1,0 +1,72 @@
+{
+  "expert": {
+    "all_distributed_shutdowns_complete": true,
+    "all_rank_hlo_equal": true,
+    "all_rank_outputs_equal": true,
+    "backward_chunk_rematerialized": true,
+    "block_shape": [
+      128,
+      128
+    ],
+    "compiler_temporary_did_not_grow_with_assignments": true,
+    "experts": 288,
+    "four_token_assignment_count": 32,
+    "four_token_compiler_temporary_bytes_per_device": 741888,
+    "hidden_size": 4096,
+    "maximum_compile_seconds_by_token_count": {
+      "1": 0.7789847399108112,
+      "4": 0.8017163490876555
+    },
+    "maximum_dequantized_weight_bytes_per_projection_global": 16777216,
+    "maximum_dequantized_weight_bytes_per_projection_per_device": 1048576,
+    "maximum_device_peak_bytes_in_use": 460946432,
+    "maximum_elapsed_seconds": 5.596570188878104,
+    "maximum_execute_seconds_by_token_count": {
+      "1": 0.1260984679684043,
+      "4": 0.1322612469084561
+    },
+    "maximum_process_vmhwm_bytes": 6720667648,
+    "maximum_shm_used_delta_bytes": 0,
+    "moe_intermediate_size": 2048,
+    "no_assignment_wide_dense_weight_in_optimized_hlo": true,
+    "one_token_assignment_count": 8,
+    "one_token_compiler_temporary_bytes_per_device": 774144,
+    "optimized_hlo_sha256_by_token_count": {
+      "1": "192c994184c605154bd62fd66f639b9cab9b6572f33238e392848e849bf5b850",
+      "4": "8f6a7a7d691ec5bb7f0bdca709d7de4f012bd61514f18338bc3ed0ec3da60172"
+    },
+    "selected_weight_batch_size": 1,
+    "source_fp8_bytes": 7247757312,
+    "source_fp8_bytes_per_device": 452984832,
+    "statistics_float32_sha256_by_token_count": {
+      "1": "405fdfb2c9a73568ed3b9297db98d50737e9f6285a7111b974b6c12a9c5a6eac",
+      "4": "dd21c6d661268dab5814d45c2627a7c5b3136a710848dca4c6fae62ccfc31873"
+    },
+    "top_k": 8,
+    "weight_workspace_independent_of_token_count": true
+  },
+  "gate": {
+    "full_model_lora_step_runnable": false,
+    "g6a_bounded_expert_input_gradient": "passed",
+    "remaining_blockers": [
+      "The bounded primitive is not yet selected by the complete model.",
+      "Full-checkpoint attention-LoRA backward and optimizer HBM remain unmeasured.",
+      "SFT loss, adapter update, checkpoint restore, and multi-step stability remain untested."
+    ]
+  },
+  "rank_result_sha256": [
+    "00a676ad2c262cc771ef64f695a8b26e73feaa6e3f571efa044ae75248e27298",
+    "9df4bd4860d681820c73e65b189e36f9d234a251026fdf828ad060bde018bb9d",
+    "e14f8c0f68af7466f7ccd9db9bfb43b4c32363536e66a5aab9919c6864cd3063",
+    "bb900ddecf20e5562b7d45c5bb4bbe180241add4d6501628ea4ccb1dd922626c"
+  ],
+  "schema_version": 1,
+  "source_revision": "ed28e5001876b3368374cc0456b0fa9476f0db1f",
+  "test": "glm53_g6a_bounded_expert_forward_backward_acceptance",
+  "topology": {
+    "accelerator_type": "v4-32",
+    "global_device_count": 16,
+    "host_count": 4,
+    "process_count": 4
+  }
+}
