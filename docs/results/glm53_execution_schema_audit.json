@@ -1,0 +1,118 @@
+{
+  "coverage": {
+    "all_text_tensors_mapped_exactly_once": true,
+    "header_network_bytes": 10684096,
+    "logical_tensor_count": 37534,
+    "mapping_sha256": "be4e5e87c71f8f51c65d41cd1f57e6cd1e0b90f7e37367b9eddce852c8112b36",
+    "scale_tensor_count": 36467,
+    "text_tensor_count": 74001
+  },
+  "elapsed_seconds": 36.642151297070086,
+  "execution": {
+    "payload_bytes_by_role": {
+      "dense_transpose": 11330650112,
+      "depthwise_conv": 6684672,
+      "direct_array": 1270774008,
+      "fp8_expert_pack": 304480124928,
+      "fp8_linear": 2617884672
+    },
+    "quantized_target_group_count": 305,
+    "role_counts": {
+      "dense_transpose": 494,
+      "depthwise_conv": 102,
+      "direct_array": 471,
+      "fp8_expert_pack": 36288,
+      "fp8_linear": 179
+    },
+    "role_dtype_counts": {
+      "dense_transpose:BF16": 494,
+      "depthwise_conv:BF16": 102,
+      "direct_array:BF16": 181,
+      "direct_array:F32": 290,
+      "fp8_expert_pack:F8_E4M3": 36288,
+      "fp8_linear:F8_E4M3": 179
+    },
+    "scale_payload_bytes": 74956800,
+    "target_group_count": 1372
+  },
+  "expert_packing": {
+    "all_groups_cover_experts_exactly_once": true,
+    "group_count": 126,
+    "group_counts_by_projection": {
+      "down": 42,
+      "gate": 42,
+      "up": 42
+    },
+    "groups_sha256": "a1677002f0a90fb025bd4df36720eb1abcd0890e25cdd7586d24d96023a3f2c3",
+    "maximum_device_staging_buffer_bytes": 150994944,
+    "maximum_device_staging_target": "layers[3].mlp.experts_down",
+    "per_device_bytes": 19025362944,
+    "sample_groups": [
+      {
+        "expert_count": 288,
+        "packed_source_shape": [
+          288,
+          4096,
+          2048
+        ],
+        "per_device_bytes": 150994944,
+        "source_bytes": 2415919104,
+        "source_matrix_shape": [
+          4096,
+          2048
+        ],
+        "target": "layers[3].mlp.experts_down"
+      },
+      {
+        "expert_count": 288,
+        "packed_source_shape": [
+          288,
+          2048,
+          4096
+        ],
+        "per_device_bytes": 150994944,
+        "source_bytes": 2415919104,
+        "source_matrix_shape": [
+          2048,
+          4096
+        ],
+        "target": "layers[3].mlp.experts_gate"
+      },
+      {
+        "expert_count": 288,
+        "packed_source_shape": [
+          288,
+          2048,
+          4096
+        ],
+        "per_device_bytes": 150994944,
+        "source_bytes": 2415919104,
+        "source_matrix_shape": [
+          2048,
+          4096
+        ],
+        "target": "layers[3].mlp.experts_up"
+      }
+    ],
+    "source_bytes": 304405807104
+  },
+  "gate": {
+    "full_model_runnable": false,
+    "g5a_execution_schema": "passed",
+    "remaining_blockers": [
+      "Block-FP8 wrappers and expert-pack contractions have not passed reduced parity.",
+      "The complete mapped PyTree has not been range-loaded on v4-32.",
+      "Whole-model compilation, HBM, and forward numerics remain unmeasured."
+    ]
+  },
+  "model": {
+    "config_sha256": "bb8f01c42cb92a52ca72e65afb4d5bd8d11aef083cd210e8de25dfb904f23e9f",
+    "index_sha256": "3c3f40366a53c3fd7974b4eab7881a365a98c2a4329150befebab99fe7c18b05",
+    "repo_id": "zai-org/GLM-5.3-Flash",
+    "revision": "04c4e9e95c5da8862dced7e5056455116f83a7e0",
+    "text_payload_bytes": 319706118392
+  },
+  "schema_version": 1,
+  "source_revision": "5653518a9d7c1c165bf01049b06b240be04650d0",
+  "test": "glm53_g5_execution_schema_audit"
+}

@@ -32,8 +32,12 @@ class AdamWHyperparameters:
 
 
 def adamw_init(params: object) -> AdamWState:
-    zeros = jax.tree.map(lambda value: jnp.zeros(value.shape, jnp.float32), params)
-    return AdamWState(jnp.asarray(0, jnp.int32), zeros, zeros)
+    # Keep the slots physically distinct. Reusing one zero tree is numerically
+    # harmless for a non-donated first update, but it presents the same buffers
+    # twice when a compiled training step donates optimizer state.
+    first = jax.tree.map(lambda value: jnp.zeros(value.shape, jnp.float32), params)
+    second = jax.tree.map(lambda value: jnp.zeros(value.shape, jnp.float32), params)
+    return AdamWState(jnp.asarray(0, jnp.int32), first, second)
 
 
 def tree_global_norm(tree: object) -> jax.Array:

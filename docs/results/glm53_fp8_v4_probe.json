@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "executed_at_utc": "2026-08-30T21:31:24Z",
+  "test": "glm53_real_block_fp8_tiled_contraction",
+  "source_revision": "2bfda04c006a1612b82d0d023397c581c092d727",
+  "model": {
+    "repo_id": "zai-org/GLM-5.3-Flash",
+    "revision": "04c4e9e95c5da8862dced7e5056455116f83a7e0",
+    "source_shard": "model-00032-of-00062.safetensors",
+    "tensor": "model.language_model.layers.3.self_attn.q_a_proj.weight",
+    "weight_shape": [1536, 4096],
+    "scale_shape": [12, 32],
+    "block_shape": [128, 128],
+    "weight_http_range_inclusive": [2941704672, 2947996127],
+    "scale_http_range_inclusive": [883976, 885511],
+    "weight_bytes": 6291456,
+    "scale_bytes": 1536,
+    "weight_sha256": "d79be6a957e1c23680665a68e4bbc9ffaf71a01bb7dc540e40140c6af9a3b3bc",
+    "scale_sha256": "165bb5ed26c4a904ba915d5bd22657560e019041ccb0f13868ddd811e3c429dd",
+    "http_status": 206,
+    "full_source_shard_downloaded": false
+  },
+  "cpu_oracle": {
+    "host": "t1v-n-51c6aeb6-w-0",
+    "versions": {
+      "python": "3.12.13",
+      "jax": "0.11.0",
+      "numpy": "2.5.2",
+      "torch": "2.13.0+cu130",
+      "transformers": "5.16.1"
+    },
+    "transformers_operator": "transformers.integrations.finegrained_fp8.Fp8Dequantize._dequantize_one",
+    "float32_tiled_vs_transformers": {
+      "max_abs": 1.2516975402832031e-06,
+      "mean_abs": 2.150743512174813e-07,
+      "relative_l2": 2.8891427542946313e-07
+    },
+    "bfloat16_tiled_vs_transformers_float32": {
+      "max_abs": 0.014255523681640625,
+      "mean_abs": 0.002520036602845721,
+      "relative_l2": 0.0033463719390990697
+    },
+    "compiler_memory_bytes": {
+      "float32_tiled_temporary": 72004,
+      "float32_full_dequant_temporary": 25165824,
+      "bfloat16_tiled_temporary": 103748,
+      "bfloat16_full_dequant_temporary": 12615680
+    },
+    "tiled_full_weight_hlo_shape_mentions": {
+      "bfloat16": 0,
+      "float32": 0,
+      "float8_e4m3fn": 0
+    }
+  },
+  "tpu": {
+    "topology": {
+      "accelerator_type": "v4-32",
+      "process_count": 4,
+      "local_device_count": 4,
+      "global_device_count": 16,
+      "jax": "0.11.0"
+    },
+    "runtime_process_indexes_by_launch_host": {
+      "t1v-n-a09f5679-w-0": 1,
+      "t1v-n-a09f5679-w-1": 3,
+      "t1v-n-a09f5679-w-2": 0,
+      "t1v-n-a09f5679-w-3": 2
+    },
+    "precision": "HIGHEST",
+    "compute_dtype": "bfloat16",
+    "compiler_memory_bytes_per_process": {
+      "arguments": 6365184,
+      "outputs": 24576,
+      "temporaries": 225792,
+      "generated_code": 71168
+    },
+    "tiled_full_weight_hlo_shape_mentions": {
+      "bfloat16": 0,
+      "float32": 0,
+      "float8_e4m3fn": 0,
+      "uint8_source": 31
+    },
+    "tiled_optimized_hlo_sha256": "28391f4bfd2910f677b4faf82c46a8d42060c2cc1e8165a0f2298f6b412e7a3f",
+    "dense_reference_full_weight_hlo_shape_mentions": {
+      "bfloat16": 5,
+      "float32": 3,
+      "float8_e4m3fn": 1,
+      "uint8_source": 17
+    },
+    "tiled_vs_dense_reference": {
+      "max_abs": 7.152557373046875e-07,
+      "mean_abs": 6.537508549323927e-08,
+      "relative_l2": 1.0452411043058073e-07
+    },
+    "tpu_bfloat16_vs_cpu_bfloat16": {
+      "max_abs": 7.152557373046875e-07,
+      "mean_abs": 7.449671102222055e-08,
+      "relative_l2": 1.176065501681098e-07,
+      "exact_fraction": 0.35986328125
+    },
+    "all_process_outputs_finite": true,
+    "all_process_output_sha256": "218f5b2977fd9fc1a3c92d40035c5ba691bd74e12b003cdf12753c7c5e0f0f12",
+    "all_process_hlo_sha256_equal": true,
+    "clean_distributed_shutdown": true
+  },
+  "gate": {
+    "g3_block_fp8_primitive": "passed",
+    "full_model_runnable": false,
+    "remaining_blockers": [
+      "No direct-to-final-NamedSharding loader has passed four-host checksum and peak-RSS validation.",
+      "The full text model has not loaded or executed with mixed FP8/BF16 leaves.",
+      "The one-weight compiler profile does not establish whole-model HBM or throughput."
+    ]
+  }
+}

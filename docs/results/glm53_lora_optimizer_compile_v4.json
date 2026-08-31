@@ -1,0 +1,99 @@
+{
+  "adapter": {
+    "a_partition_spec": [],
+    "b_partition_spec": [
+      null,
+      "model"
+    ],
+    "global_parameter_count": 10289152,
+    "global_parameter_count_by_factor": {
+      "a": 3956736,
+      "b": 6332416
+    },
+    "parameter_bytes_per_device": 8705024,
+    "target_count": 191
+  },
+  "compilation": {
+    "alias_bytes_not_subtracted_from_conservative_bound": true,
+    "alias_size_in_bytes": 43581952,
+    "all_distributed_shutdowns_complete": true,
+    "all_rank_hlo_equal": true,
+    "argument_size_in_bytes": 20305797120,
+    "compiler_working_set_upper_bound_bytes_per_device": 21680681472,
+    "full_checkpoint_optimizer_execution_authorized": true,
+    "generated_code_size_in_bytes": 220750848,
+    "headroom_before_safety_margin_bytes_per_device": 11333725696,
+    "host_argument_size_in_bytes": 0,
+    "host_output_size_in_bytes": 0,
+    "host_temp_size_in_bytes": 0,
+    "maximum_compile_seconds": 621.9824902350083,
+    "maximum_elapsed_seconds": 680.3455768069252,
+    "maximum_process_vmhwm_bytes": 19003092992,
+    "measured_hbm_limit_bytes_per_device": 33014407168,
+    "no_assignment_wide_dense_weight_in_optimized_hlo": true,
+    "optimized_hlo_bytes": 168571782,
+    "optimized_hlo_sha256": "084e398808cd6c1dcf51601a5b24be3c8b5583b9b14b71a3d45af4311e28c8ba",
+    "output_size_in_bytes": 43587584,
+    "required_safety_margin_bytes_per_device": 1073741824,
+    "temp_size_in_bytes": 1331296768
+  },
+  "gate": {
+    "full_checkpoint_three_step_execution_authorized": true,
+    "full_model_optimizer_update_proven": false,
+    "g6c0_full_attention_lora_optimizer_compile": "passed",
+    "remaining_blockers": [
+      "The complete checkpoint has not executed this donated AdamW program.",
+      "Adapter-only checkpoint save/restore has not passed on sharded state.",
+      "Three-step and 10--50-step loss/gradient/memory stability remain unmeasured."
+    ]
+  },
+  "header_only_loader": {
+    "checkpoint_payload_bytes_per_host": 0,
+    "header_bytes_per_host": 10684096,
+    "maximum_header_seconds": 41.29330130107701,
+    "maximum_shm_used_delta_bytes": 0
+  },
+  "optimizer": {
+    "adapter_dtype": "bfloat16",
+    "beta1": 0.9,
+    "beta2": 0.95,
+    "donated_argument_numbers": [
+      1,
+      2
+    ],
+    "epsilon": 1e-08,
+    "learning_rate": 1e-05,
+    "max_grad_norm": 1.0,
+    "moment_bytes_per_slot_per_device": 17410048,
+    "moment_dtype": "float32",
+    "moment_global_elements_per_slot": 10289152,
+    "moment_slot_count": 2,
+    "name": "AdamW",
+    "optimizer_state_bytes_per_device": 34820100,
+    "step_dtype": "int32",
+    "step_global_elements": 1,
+    "weight_decay": 0.1
+  },
+  "rank_result_sha256": [
+    "44fafbd1e4c61c4129ef79eb6ad50bf495c207c3fc75281b3cbb75c06b75a5d1",
+    "3f2482c8d8d698b9acd61288d023edf7d6da3e7897a764e8f52aea9ed4a690ee",
+    "75523ee2936fdc06b55555bb92f58cee946a182f498cc6bd481ba7167b651f7e",
+    "df3af856ccbd4a150f808db4375a3de2aed187053053228ab348afafa540b48a"
+  ],
+  "schema_version": 1,
+  "source_revision": "088c24a4232306606a0801675a11b70492e36ebd",
+  "test": "glm53_g6c0_full_attention_lora_optimizer_compile_acceptance",
+  "topology": {
+    "accelerator_type": "v4-32",
+    "global_device_count": 16,
+    "host_count": 4,
+    "physical_hostname_order_independent_of_process_index": true,
+    "physical_hostnames": [
+      "t1v-n-a09f5679-w-0",
+      "t1v-n-a09f5679-w-1",
+      "t1v-n-a09f5679-w-2",
+      "t1v-n-a09f5679-w-3"
+    ],
+    "process_count": 4
+  }
+}
