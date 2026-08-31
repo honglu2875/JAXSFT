@@ -103,8 +103,9 @@ Current branch status:
 | G5c1 real checkpoint expert streaming | passed | commit `3869a9b`; [`glm53_real_expert_streaming_v4.json`](../results/glm53_real_expert_streaming_v4.json) |
 | G5c2 full frozen forward | passed | run commit `da5c6a7`; [`glm53_full_forward_v4.json`](../results/glm53_full_forward_v4.json) |
 | G6a bounded expert input gradient | passed | run commit `ed28e50`; [`glm53_bounded_expert_v4.json`](../results/glm53_bounded_expert_v4.json) |
-| G6b full-model attention-LoRA backward | pending | bounded primitive not yet wired into the complete model |
-| G6c loss/update/checkpoint, 3 steps | pending | blocked by G6b HBM gate |
+| G6b0 full-model attention-LoRA backward compile | passed | run commit `56cd8b7`; [`glm53_lora_backward_compile_v4.json`](../results/glm53_lora_backward_compile_v4.json) |
+| G6b1 full-checkpoint attention-LoRA backward execution | pending | compile gate permits the bounded execution probe |
+| G6c loss/update/checkpoint, 3 steps | pending | blocked by G6b1 execution gate |
 | G6d 10--50 step stability | pending | blocked by G6c |
 
 ### G0 — Metadata and static preflight
@@ -293,6 +294,23 @@ was 6,720,667,648 bytes, and RAMFS growth was zero. Four-token forward plus
 input gradient completed in at most 0.133 seconds across ranks. This passes the
 expert input-gradient primitive only; it does not yet measure a complete-model
 adapter gradient or optimizer update.
+
+Measured G6b0 result: all four v4-32 ranks reconstructed the exact sharded
+parameter signature from the 62 pinned headers and compiled a rank-4,
+batch-1, sequence-2 weighted causal loss plus gradients for all 191 attention
+LoRA targets. No checkpoint tensor or scale payload was read. LoRA `A` is
+replicated and `B` is output-sharded; the 10,289,152 trainable parameters use
+8,705,024 bytes per chip before gradients or optimizer state.
+
+The executable reports 20,270,928,384 argument bytes, 8,718,336 output bytes,
+and 1,248,113,152 temporary bytes per chip. Their conservative sum is
+21,527,759,872 bytes, leaving 11,486,647,296 bytes against the measured HBM
+limit before the explicit 1 GiB safety margin. All ranks emitted the same
+optimized HLO hash. The HLO contains the bounded one-matrix local expert
+shapes and no flattened or token/top-k assignment-wide dense expert weight.
+This passes the compile-only G6b0 capacity gate and authorizes one smallest
+full-checkpoint backward execution. It does not prove finite loss/gradients,
+an optimizer update, or multi-step training.
 
 ## Stop conditions
 

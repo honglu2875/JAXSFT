@@ -1,0 +1,77 @@
+{
+  "adapter": {
+    "a_partition_spec": [],
+    "b_partition_spec": [
+      null,
+      "model"
+    ],
+    "global_parameter_count": 10289152,
+    "global_parameter_count_by_factor": {
+      "a": 3956736,
+      "b": 6332416
+    },
+    "parameter_bytes_per_device": 8705024,
+    "target_count": 191
+  },
+  "compilation": {
+    "alias_size_in_bytes": 0,
+    "all_distributed_shutdowns_complete": true,
+    "all_rank_hlo_equal": true,
+    "argument_size_in_bytes": 20270928384,
+    "compiler_working_set_upper_bound_bytes_per_device": 21527759872,
+    "full_checkpoint_execution_authorized": true,
+    "generated_code_size_in_bytes": 211123200,
+    "headroom_before_safety_margin_bytes_per_device": 11486647296,
+    "host_argument_size_in_bytes": 0,
+    "host_output_size_in_bytes": 0,
+    "host_temp_size_in_bytes": 0,
+    "maximum_compile_seconds": 584.3571909649763,
+    "maximum_elapsed_seconds": 641.9317399191204,
+    "maximum_process_vmhwm_bytes": 18455437312,
+    "measured_hbm_limit_bytes_per_device": 33014407168,
+    "no_assignment_wide_dense_weight_in_optimized_hlo": true,
+    "optimized_hlo_bytes": 163191375,
+    "optimized_hlo_sha256": "19702470dc779b6609734f91aeea9e9849e81580622fc4d24ddaf5c7168b0bdc",
+    "output_size_in_bytes": 8718336,
+    "required_safety_margin_bytes_per_device": 1073741824,
+    "temp_size_in_bytes": 1248113152
+  },
+  "gate": {
+    "full_checkpoint_backward_execution_authorized": true,
+    "full_model_lora_backward_proven": false,
+    "g6b0_full_attention_lora_backward_compile": "passed",
+    "remaining_blockers": [
+      "The complete checkpoint has not executed this adapter-gradient program.",
+      "Finite/nonzero full-model loss and adapter gradients remain unmeasured.",
+      "Optimizer update, adapter-only checkpoint restore, and multi-step stability remain untested."
+    ]
+  },
+  "header_only_loader": {
+    "checkpoint_payload_bytes_per_host": 0,
+    "header_bytes_per_host": 10684096,
+    "maximum_header_seconds": 39.18233734299429,
+    "maximum_shm_used_delta_bytes": 0
+  },
+  "rank_result_sha256": [
+    "7c05a19eab89c1b306819a9798e6f6e1c8f383ce45c85f8f3008c7c1f789fbe6",
+    "7ce3462f8f6e8708539f561fa39824f4bae9cb52e0c1c72b6b5a0d65b39cd0f7",
+    "2dc90d81095395baaefe9c3fc7a2127d057ed3ca6778f176dd6c8159a1aac3a5",
+    "331a656e76398d5c2724ba3c907a956840faafdcee9e82cff455c51a92d8faff"
+  ],
+  "schema_version": 1,
+  "source_revision": "56cd8b7a7fab16009f74614e6605d19298c5a0b4",
+  "test": "glm53_g6b0_full_attention_lora_backward_compile_acceptance",
+  "topology": {
+    "accelerator_type": "v4-32",
+    "global_device_count": 16,
+    "host_count": 4,
+    "physical_hostname_order_independent_of_process_index": true,
+    "physical_hostnames": [
+      "t1v-n-a09f5679-w-0",
+      "t1v-n-a09f5679-w-1",
+      "t1v-n-a09f5679-w-2",
+      "t1v-n-a09f5679-w-3"
+    ],
+    "process_count": 4
+  }
+}
