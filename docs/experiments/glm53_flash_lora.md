@@ -106,8 +106,8 @@ Current branch status:
 | G6b0 full-model attention-LoRA backward compile | passed | run commit `56cd8b7`; [`glm53_lora_backward_compile_v4.json`](../results/glm53_lora_backward_compile_v4.json) |
 | G6b1 full-checkpoint attention-LoRA backward execution | passed | run commit `ccd5416`; [`glm53_lora_backward_v4.json`](../results/glm53_lora_backward_v4.json) |
 | G6c0 full-model adapter-only AdamW compile | passed | run commit `088c24a`; [`glm53_lora_optimizer_compile_v4.json`](../results/glm53_lora_optimizer_compile_v4.json) |
-| G6c1 loss/update/checkpoint, 3 steps | pending | G6c0 permits one bounded full-checkpoint execution probe |
-| G6d 10--50 step stability | pending | blocked by G6c1 |
+| G6c1 loss/update/checkpoint, 3 steps | passed | run commit `543350c`; [`glm53_lora_three_step_v4.json`](../results/glm53_lora_three_step_v4.json) |
+| G6d total-10-step resume stability | pending | G6c1 permits one resume-from-step-2 probe; 50 steps remain unauthorized |
 
 ### G0 — Metadata and static preflight
 
@@ -343,6 +343,30 @@ the 1 GiB reserve. Every rank emitted the same HLO hash with bounded expert
 shapes, read zero checkpoint payload bytes, and shut down cleanly. This passes
 G6c0 and authorizes one three-step full-checkpoint execution with an
 adapter-only save/restore boundary; it does not prove that execution yet.
+
+Measured G6c1 result: the complete checkpoint executed three donated AdamW
+steps with BF16 adapters and two FP32 moment slots. All ranks produced the same
+losses (`12.2412443`, `12.2346916`, `12.2660503`), pre-clipping gradient norms
+(`2.70546`, `2.76051`, `2.75833`), and state hashes. The loss range was 0.256%
+of step-1 loss and step 3 was 0.203% above step 1, so the finite trajectory is
+explicitly non-monotonic and is not an optimization-quality result. Each step
+took at most 248.64 seconds.
+
+After step 2, every host atomically wrote only the adapter and Adam state:
+1,147 leaves, 2,866 unique local shards, and 55,398,404 raw tensor bytes. The
+frozen base was excluded. Independent controller-side validation rehashed all
+11,464 NPZ members, proved exact coverage of 9,742 global shards and
+102,891,524 logical bytes, and reproduced global payload hash
+`30f9cf81f7162b46157e5d7a5a6d18755464d0709972e1fd1fdb95ec5ccd655a`.
+Every local shard and the complete step-2 statistics vector matched after
+restore before step 3 executed.
+
+Peak HBM was 20,601,684,480 of 33,014,407,168 bytes per chip, leaving
+12,412,722,688 bytes of raw headroom. Peak growth from step 1 to step 3 was
+only 86,016 bytes, the smallest free block was 11,615,084,032 bytes, and
+RAMFS payload growth remained zero. This passes G6c1 and authorizes a single
+resume-from-step-2 run through total step 10. It does not authorize 50 steps,
+long sequences, or an instruction-dataset claim.
 
 ## Stop conditions
 
