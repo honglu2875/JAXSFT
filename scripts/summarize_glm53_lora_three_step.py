@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -243,6 +244,15 @@ EXPECTED_CHECKPOINT_ARTIFACTS = {
 }
 
 
+@dataclass(frozen=True)
+class CheckpointArtifactContract:
+    checkpoint_step: int
+    identity: Mapping[str, Any]
+    artifacts_by_process_index: Mapping[int, Mapping[str, Any]]
+    replicated_payload_sha256: str
+    global_payload_sha256: str | None
+
+
 def _load(path: Path) -> tuple[dict[str, Any], str, int]:
     payload = path.read_bytes()
 
@@ -303,9 +313,26 @@ def _validate_checkpoint_artifacts(
     payload_paths: Sequence[Path],
     *,
     source_revision: str,
+    contract: CheckpointArtifactContract | None = None,
 ) -> tuple[dict[str, Any], dict[int, dict[str, Any]]]:
     if len(manifest_paths) != 4 or len(payload_paths) != 4:
         raise ValueError("exactly four checkpoint manifests and payloads are required")
+    if contract is None:
+        contract = CheckpointArtifactContract(
+            checkpoint_step=2,
+            identity={
+                "format_purpose": (
+                    "GLM-5.3-Flash rank-4 attention-LoRA adapter-only AdamW"
+                ),
+                "model_repo_id": "zai-org/GLM-5.3-Flash",
+                "model_revision": "04c4e9e95c5da8862dced7e5056455116f83a7e0",
+                "source_revision": source_revision,
+                "step": 2,
+            },
+            artifacts_by_process_index=EXPECTED_CHECKPOINT_ARTIFACTS,
+            replicated_payload_sha256=EXPECTED_REPLICATED_CHECKPOINT_SHA256,
+            global_payload_sha256=EXPECTED_GLOBAL_CHECKPOINT_SHA256,
+        )
     payloads_by_hash: dict[str, tuple[Path, int]] = {}
     for path in payload_paths:
         digest, size = _hash_file(path)
@@ -324,23 +351,16 @@ def _validate_checkpoint_artifacts(
         rank = manifest.get("process_index")
         if not isinstance(rank, int) or rank not in range(4) or rank in manifests:
             raise ValueError("checkpoint manifests do not uniquely cover four process indexes")
-        expected_artifact = EXPECTED_CHECKPOINT_ARTIFACTS[rank]
+        expected_artifact = contract.artifacts_by_process_index[rank]
         if (
             manifest_sha256 != expected_artifact["manifest_sha256"]
             or manifest_bytes != expected_artifact["manifest_file_bytes"]
         ):
             raise ValueError("checkpoint manifest file identity drifted")
-        expected_identity = {
-            "format_purpose": "GLM-5.3-Flash rank-4 attention-LoRA adapter-only AdamW",
-            "model_repo_id": "zai-org/GLM-5.3-Flash",
-            "model_revision": "04c4e9e95c5da8862dced7e5056455116f83a7e0",
-            "source_revision": source_revision,
-            "step": 2,
-        }
         expected_common = {
             "schema_version": 1,
             "format": "jaxsft_rank_local_sharded_pytree_npz",
-            "identity": expected_identity,
+            "identity": dict(contract.identity),
             "process_index": rank,
             "process_count": 4,
             "root_keys": ["adapters", "optimizer"],
@@ -352,7 +372,7 @@ def _validate_checkpoint_artifacts(
             "local_unique_shard_count": EXPECTED_CHECKPOINT_LOCAL_UNIQUE_SHARDS,
             "local_unique_tensor_bytes": EXPECTED_CHECKPOINT_LOCAL_UNIQUE_BYTES,
             "local_device_resident_bytes": EXPECTED_CHECKPOINT_LOCAL_DEVICE_RESIDENT_BYTES,
-            "replicated_payload_sha256": EXPECTED_REPLICATED_CHECKPOINT_SHA256,
+            "replicated_payload_sha256": contract.replicated_payload_sha256,
             "npz_file": f"rank-{rank:03d}.npz",
             "npz_file_bytes": 56_172_246,
         }
@@ -553,12 +573,15 @@ def _validate_checkpoint_artifacts(
         for (path, index), record in global_shards.items()
     ]
     global_sha256 = _canonical_payload_hash(global_records)
-    if global_sha256 != EXPECTED_GLOBAL_CHECKPOINT_SHA256:
+    if (
+        contract.global_payload_sha256 is not None
+        and global_sha256 != contract.global_payload_sha256
+    ):
         raise ValueError("global adapter-only checkpoint payload hash drifted")
     return (
         {
             "format": "jaxsft_rank_local_sharded_pytree_npz",
-            "checkpoint_step": 2,
+            "checkpoint_step": contract.checkpoint_step,
             "root_keys": ["adapters", "optimizer"],
             "frozen_base_included": False,
             "leaf_count": EXPECTED_CHECKPOINT_LEAF_COUNT,
@@ -566,7 +589,7 @@ def _validate_checkpoint_artifacts(
             "global_logical_tensor_bytes": EXPECTED_CHECKPOINT_GLOBAL_LOGICAL_BYTES,
             "globally_unique_shard_count": EXPECTED_CHECKPOINT_UNIQUE_GLOBAL_SHARDS,
             "global_payload_sha256": global_sha256,
-            "replicated_payload_sha256": EXPECTED_REPLICATED_CHECKPOINT_SHA256,
+            "replicated_payload_sha256": contract.replicated_payload_sha256,
             "npz_bytes_across_hosts": total_npz_bytes,
             "manifest_bytes_across_hosts": total_manifest_bytes,
             "all_npz_member_hashes_verified": True,
@@ -574,11 +597,13 @@ def _validate_checkpoint_artifacts(
             "all_replicated_payloads_equal": True,
             "artifact_sha256_by_process_index": {
                 str(rank): {
-                    "manifest_sha256": EXPECTED_CHECKPOINT_ARTIFACTS[rank][
+                    "manifest_sha256": contract.artifacts_by_process_index[rank][
                         "manifest_sha256"
                     ],
-                    "npz_sha256": EXPECTED_CHECKPOINT_ARTIFACTS[rank]["npz_sha256"],
-                    "local_payload_sha256": EXPECTED_CHECKPOINT_ARTIFACTS[rank][
+                    "npz_sha256": contract.artifacts_by_process_index[rank][
+                        "npz_sha256"
+                    ],
+                    "local_payload_sha256": contract.artifacts_by_process_index[rank][
                         "local_payload_sha256"
                     ],
                 }

@@ -107,7 +107,7 @@ Current branch status:
 | G6b1 full-checkpoint attention-LoRA backward execution | passed | run commit `ccd5416`; [`glm53_lora_backward_v4.json`](../results/glm53_lora_backward_v4.json) |
 | G6c0 full-model adapter-only AdamW compile | passed | run commit `088c24a`; [`glm53_lora_optimizer_compile_v4.json`](../results/glm53_lora_optimizer_compile_v4.json) |
 | G6c1 loss/update/checkpoint, 3 steps | passed | run commit `543350c`; [`glm53_lora_three_step_v4.json`](../results/glm53_lora_three_step_v4.json) |
-| G6d total-10-step resume stability | pending | G6c1 permits one resume-from-step-2 probe; 50 steps remain unauthorized |
+| G6d total-10-step resume stability | passed | run commit `d47e00b`; [`glm53_lora_ten_step_v4.json`](../results/glm53_lora_ten_step_v4.json) |
 
 ### G0 — Metadata and static preflight
 
@@ -367,6 +367,28 @@ only 86,016 bytes, the smallest free block was 11,615,084,032 bytes, and
 RAMFS payload growth remained zero. This passes G6c1 and authorizes a single
 resume-from-step-2 run through total step 10. It does not authorize 50 steps,
 long sequences, or an instruction-dataset claim.
+
+Measured G6d result: all four ranks restored the pinned step-2 adapter and Adam
+shards before loading the frozen base, then reproduced step 3 exactly and ran
+through total step 10. Losses remained finite but non-monotonic, ranging from
+`12.1497936` to `12.2660503`; step-10 loss was `12.2053318`, 0.293% below
+step 1. Every pre-clipping gradient norm was finite and above the 1.0 clipping
+threshold, and all ranks produced identical per-step state hashes.
+
+Peak HBM was 20,599,073,792 of 33,014,407,168 bytes per chip, leaving
+12,415,333,376 bytes of raw headroom. The cumulative high-water mark did not
+increase from step 3 through step 10, the smallest free block was
+11,617,694,720 bytes, and RAMFS payload growth remained zero. Each step took at
+most 248.76 seconds.
+
+After step 10, every host again saved only adapters and Adam state. Independent
+controller validation rehashed all 11,464 NPZ members, covered 9,742 global
+shards and 102,891,524 logical bytes, and reproduced global payload hash
+`bec4348e8a18d803ef0455867915bd2bc49ea64e834ebebb295472c8a108e8c2`.
+The complete state statistics matched after byte-exact restore. G6d therefore
+authorizes an optional total-50-step fixed-token resume probe. It does not
+authorize a realistic instruction sequence: tokenizer/loss-mask parity and a
+sequence-length-specific header-only compile/HBM gate remain required first.
 
 ## Stop conditions
 
