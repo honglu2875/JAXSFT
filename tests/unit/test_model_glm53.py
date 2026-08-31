@@ -19,6 +19,7 @@ from jaxsft.models.glm5_3_flash import (
     attention_lora_parameter_count,
     attention_lora_target_paths,
     block_fp8_linear,
+    bounded_selected_block_fp8_linear,
     checkpoint_text_tensor_specs,
     dequantize_block_fp8,
     forward,
@@ -418,6 +419,89 @@ def test_block_fp8_kernel_pytrees_and_selected_experts_match_dense_reference():
         )
     ).lower(inputs[:1], single)
     assert single_lowered is not None
+
+
+@pytest.mark.parametrize("selected_weight_batch_size", [1, 3, 4, 7])
+def test_bounded_selected_block_fp8_matches_reference_forward_and_input_gradient(
+    selected_weight_batch_size,
+):
+    values = jnp.asarray(
+        np.linspace(-2.0, 2.0, num=3 * 4 * 6).reshape(3, 4, 6),
+        dtype=jnp.float8_e4m3fn,
+    )
+    bits = jax.lax.bitcast_convert_type(values, jnp.uint8)
+    scales = jnp.asarray(
+        [
+            [[0.5, 1.0], [1.5, 2.0]],
+            [[0.75, 1.25], [1.75, 2.25]],
+            [[1.0, 1.5], [2.0, 2.5]],
+        ],
+        jnp.float32,
+    )
+    kernel = BatchedBlockFP8LinearKernel(
+        bits,
+        scales,
+        block_shape=(2, 3),
+        compute_dtype=jnp.float32,
+    )
+    inputs = jnp.asarray(
+        [[1, 2, 3, 4, 5, 6], [-2, 1, 0.5, 3, -1, 2], [3, -1, 2, 0, 4, -2]],
+        jnp.float32,
+    )
+    indices = jnp.asarray([[0, 2], [1, 0], [2, 1]], jnp.int32)
+    bounded = bounded_selected_block_fp8_linear(
+        inputs,
+        indices,
+        kernel,
+        selected_weight_batch_size=selected_weight_batch_size,
+    )
+    reference = selected_block_fp8_linear(inputs, indices, kernel)
+    assert np.allclose(bounded, reference, atol=2e-6, rtol=2e-6)
+
+    cotangent = jnp.asarray(np.linspace(-1.0, 1.0, num=3 * 2 * 4).reshape(3, 2, 4))
+
+    def reference_loss(current_inputs):
+        return jnp.sum(selected_block_fp8_linear(current_inputs, indices, kernel) * cotangent)
+
+    def bounded_loss(current_inputs):
+        output = bounded_selected_block_fp8_linear(
+            current_inputs,
+            indices,
+            kernel,
+            selected_weight_batch_size=selected_weight_batch_size,
+        )
+        return jnp.sum(output * cotangent)
+
+    expected_gradient = jax.grad(reference_loss)(inputs)
+    actual_gradient = jax.jit(jax.grad(bounded_loss))(inputs)
+    assert np.allclose(actual_gradient, expected_gradient, atol=2e-6, rtol=2e-6)
+
+
+def test_bounded_selected_block_fp8_validates_static_workspace_bound():
+    bits = jnp.zeros((2, 4, 6), jnp.uint8)
+    scales = jnp.ones((2, 2, 2), jnp.float32)
+    kernel = BatchedBlockFP8LinearKernel(
+        bits,
+        scales,
+        block_shape=(2, 3),
+        compute_dtype=jnp.float32,
+    )
+    inputs = jnp.ones((1, 6), jnp.float32)
+    indices = jnp.zeros((1, 1), jnp.int32)
+    with pytest.raises(ValueError, match="positive integer"):
+        bounded_selected_block_fp8_linear(
+            inputs,
+            indices,
+            kernel,
+            selected_weight_batch_size=0,
+        )
+    with pytest.raises(ValueError, match="positive integer"):
+        bounded_selected_block_fp8_linear(
+            inputs,
+            indices,
+            kernel,
+            selected_weight_batch_size=True,
+        )
 
 
 def test_bfloat16_expansion_fails_v4_32_before_activations():

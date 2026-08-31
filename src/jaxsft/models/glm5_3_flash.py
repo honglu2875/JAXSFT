@@ -670,6 +670,107 @@ def selected_block_fp8_linear(
     return output.astype(output_dtype)
 
 
+def bounded_selected_block_fp8_linear(
+    inputs: Any,
+    expert_indices: Any,
+    kernel: BatchedBlockFP8LinearKernel,
+    *,
+    selected_weight_batch_size: int = 1,
+    output_dtype: Any | None = None,
+) -> jax.Array:
+    """Apply selected experts with a sequence-length-independent weight workspace.
+
+    The reference :func:`selected_block_fp8_linear` gathers and dequantizes all
+    ``tokens * top_k`` selected matrices at once. This variant flattens those
+    assignments and processes a fixed, statically bounded number of matrices
+    per ``lax.map`` iteration. The chunk body is rematerialized in reverse
+    mode so input-gradient computation does not retain every dequantized weight.
+
+    The returned activation still necessarily scales with the number of routed
+    assignments. Only the much larger selected-weight workspace is bounded by
+    ``selected_weight_batch_size``; an optimized grouped-expert dispatcher can
+    replace this correctness-first kernel later without changing MoE math.
+    """
+
+    inputs = jnp.asarray(inputs)
+    expert_indices = jnp.asarray(expert_indices)
+    if inputs.ndim != 2 or expert_indices.ndim != 2 or inputs.shape[0] != expert_indices.shape[0]:
+        raise ValueError("selected expert inputs must be [tokens,in] with indices [tokens,top_k]")
+    if inputs.shape[0] <= 0 or expert_indices.shape[1] <= 0:
+        raise ValueError("bounded selected expert inputs and top_k must be non-empty")
+    if (
+        isinstance(selected_weight_batch_size, bool)
+        or not isinstance(selected_weight_batch_size, int)
+        or selected_weight_batch_size <= 0
+    ):
+        raise ValueError("selected_weight_batch_size must be a positive integer")
+    _, input_size, output_size = kernel.shape
+    if inputs.shape[1] != input_size:
+        raise ValueError(f"selected expert input width {inputs.shape[1]} does not match {input_size}")
+    if not jnp.issubdtype(inputs.dtype, jnp.floating):
+        raise TypeError("selected expert inputs must be floating point")
+    if not jnp.issubdtype(expert_indices.dtype, jnp.integer):
+        raise TypeError("selected expert indices must be integers")
+    if output_dtype is None:
+        output_dtype = inputs.dtype
+    output_dtype = jnp.dtype(output_dtype)
+    if not jnp.issubdtype(output_dtype, jnp.floating):
+        raise TypeError("bounded selected expert output dtype must be floating point")
+
+    token_count, top_k = expert_indices.shape
+    assignment_count = token_count * top_k
+    chunk_count = (assignment_count + selected_weight_batch_size - 1) // selected_weight_batch_size
+    padded_assignment_count = chunk_count * selected_weight_batch_size
+    padding = padded_assignment_count - assignment_count
+    flat_inputs = jnp.broadcast_to(
+        inputs[:, None, :],
+        (token_count, top_k, input_size),
+    ).reshape(assignment_count, input_size)
+    flat_indices = expert_indices.reshape(assignment_count)
+    if padding:
+        flat_inputs = jnp.pad(flat_inputs, ((0, padding), (0, 0)))
+        flat_indices = jnp.pad(flat_indices, ((0, padding),))
+    input_chunks = flat_inputs.reshape(chunk_count, selected_weight_batch_size, input_size)
+    index_chunks = flat_indices.reshape(chunk_count, selected_weight_batch_size)
+
+    compute_dtype = jnp.dtype(kernel.compute_dtype)
+    block_rows, block_columns = kernel.block_shape
+
+    def chunk_body(chunk: tuple[jax.Array, jax.Array]) -> jax.Array:
+        chunk_inputs, chunk_indices = chunk
+        selected_bits = kernel.weight_bits[chunk_indices]
+        selected_scales = kernel.weight_scale_inv[chunk_indices]
+        quantized = fp8_e4m3fn_from_bits(selected_bits).astype(compute_dtype).reshape(
+            selected_weight_batch_size,
+            output_size // block_rows,
+            block_rows,
+            input_size // block_columns,
+            block_columns,
+        )
+        scales = selected_scales.astype(compute_dtype)[..., :, None, :, None]
+        dense = (quantized * scales).reshape(
+            selected_weight_batch_size,
+            output_size,
+            input_size,
+        )
+        return jnp.einsum(
+            "bi,boi->bo",
+            chunk_inputs.astype(compute_dtype),
+            dense,
+            precision=_PRECISION,
+            preferred_element_type=jnp.float32,
+        ).astype(output_dtype)
+
+    # Recompute one bounded chunk during the backward pass instead of retaining
+    # every dequantized selected matrix from the forward pass.
+    chunk_outputs = jax.lax.map(
+        jax.checkpoint(chunk_body),
+        (input_chunks, index_chunks),
+    )
+    flat_output = chunk_outputs.reshape(padded_assignment_count, output_size)[:assignment_count]
+    return flat_output.reshape(token_count, top_k, output_size)
+
+
 @dataclass(frozen=True)
 class LinearAttentionConfig:
     num_heads: int
@@ -2462,6 +2563,7 @@ __all__ = [
     "attention_lora_parameter_count",
     "attention_lora_target_paths",
     "block_fp8_linear",
+    "bounded_selected_block_fp8_linear",
     "checkpoint_text_tensor_specs",
     "convert_hf_state_dict",
     "dequantize_block_fp8",
