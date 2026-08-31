@@ -535,12 +535,17 @@ class BlockFP8LinearKernel:
     def tree_unflatten(cls, auxiliary, children):
         block_shape, compute_dtype = auxiliary
         weight_bits, weight_scale_inv = children
-        return cls(
-            weight_bits,
-            weight_scale_inv,
-            block_shape=block_shape,
-            compute_dtype=jnp.dtype(compute_dtype),
-        )
+        # JAX 0.11 reconstructs input pytrees with internal ``ArgInfo`` leaves
+        # while preparing ``jit(...).lower(...)``.  Those abstract leaves do
+        # not expose the ndarray attributes checked by ``__post_init__``.  The
+        # public constructor still validates every concrete kernel; unflatten
+        # must only restore the already-validated pytree container.
+        kernel = object.__new__(cls)
+        object.__setattr__(kernel, "weight_bits", weight_bits)
+        object.__setattr__(kernel, "weight_scale_inv", weight_scale_inv)
+        object.__setattr__(kernel, "block_shape", block_shape)
+        object.__setattr__(kernel, "compute_dtype", jnp.dtype(compute_dtype))
+        return kernel
 
 
 @jax.tree_util.register_pytree_node_class
@@ -600,12 +605,15 @@ class BatchedBlockFP8LinearKernel:
     def tree_unflatten(cls, auxiliary, children):
         block_shape, compute_dtype = auxiliary
         weight_bits, weight_scale_inv = children
-        return cls(
-            weight_bits,
-            weight_scale_inv,
-            block_shape=block_shape,
-            compute_dtype=jnp.dtype(compute_dtype),
-        )
+        # See ``BlockFP8LinearKernel.tree_unflatten``: lowering may supply
+        # abstract ``ArgInfo`` leaves which cannot pass concrete-array shape
+        # validation.  Concrete construction remains fail-closed.
+        kernel = object.__new__(cls)
+        object.__setattr__(kernel, "weight_bits", weight_bits)
+        object.__setattr__(kernel, "weight_scale_inv", weight_scale_inv)
+        object.__setattr__(kernel, "block_shape", block_shape)
+        object.__setattr__(kernel, "compute_dtype", jnp.dtype(compute_dtype))
+        return kernel
 
 
 def selected_block_fp8_linear(

@@ -403,6 +403,22 @@ def test_block_fp8_kernel_pytrees_and_selected_experts_match_dense_reference():
     assert single.ndim == 2
     assert single.size == 24
 
+    # JAX 0.11 reconstructs custom input pytrees with abstract ArgInfo leaves
+    # during ``lower``.  Kernel validation belongs at concrete construction,
+    # so both wrappers must survive that abstract unflattening phase.
+    selected_lowered = jax.jit(selected_block_fp8_linear).lower(inputs, indices, kernel)
+    assert selected_lowered is not None
+    single_lowered = jax.jit(
+        lambda value, wrapped: block_fp8_linear(
+            value,
+            wrapped.weight_bits,
+            wrapped.weight_scale_inv,
+            block_shape=wrapped.block_shape,
+            compute_dtype=wrapped.compute_dtype,
+        )
+    ).lower(inputs[:1], single)
+    assert single_lowered is not None
+
 
 def test_bfloat16_expansion_fails_v4_32_before_activations():
     assert OFFICIAL_CHECKPOINT.logical_parameter_count == 321_323_031_390
