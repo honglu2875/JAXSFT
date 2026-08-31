@@ -638,6 +638,11 @@ def test_full_reduced_fp8_wrappers_and_expert_packs_match_dequantized_lora_refer
     ):
         assert np.allclose(actual, expected, atol=3e-5, rtol=3e-5)
 
+    quantized_jaxpr = jax.make_jaxpr(
+        lambda current_adapters: adapter_loss(quantized, current_adapters)
+    )(adapters)
+    assert "scan" in str(quantized_jaxpr)
+
 
 def test_glm_attention_lora_zero_identity_and_merged_equivalence():
     config = tiny_config(vocab_size=48)

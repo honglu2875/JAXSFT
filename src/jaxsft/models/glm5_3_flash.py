@@ -2034,8 +2034,18 @@ def _moe(params: ArrayTree, config: Glm53TextConfig, hidden: jax.Array) -> jax.A
     topk_weights *= config.routed_scaling_factor
 
     if "experts_gate" in params:
-        gate = selected_block_fp8_linear(tokens, topk_indices, params["experts_gate"])
-        up = selected_block_fp8_linear(tokens, topk_indices, params["experts_up"])
+        gate = bounded_selected_block_fp8_linear(
+            tokens,
+            topk_indices,
+            params["experts_gate"],
+            selected_weight_batch_size=1,
+        )
+        up = bounded_selected_block_fp8_linear(
+            tokens,
+            topk_indices,
+            params["experts_up"],
+            selected_weight_batch_size=1,
+        )
     else:
         selected_gate_up = params["experts_gate_up"][topk_indices]
         gate_up = jnp.einsum(
@@ -2044,10 +2054,11 @@ def _moe(params: ArrayTree, config: Glm53TextConfig, hidden: jax.Array) -> jax.A
         gate, up = jnp.split(gate_up, 2, axis=-1)
     activated = _swiglu(gate, up, config.swiglu_limit)
     if isinstance(params["experts_down"], BatchedBlockFP8LinearKernel):
-        routed = selected_block_fp8_linear(
+        routed = bounded_selected_block_fp8_linear(
             activated.reshape(-1, activated.shape[-1]),
             topk_indices.reshape(-1, 1),
             params["experts_down"],
+            selected_weight_batch_size=1,
         )
         routed = routed.reshape(*activated.shape[:-1], config.hidden_size)
     else:
