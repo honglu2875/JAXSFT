@@ -303,6 +303,14 @@ def _install_artifact_stub(monkeypatch):
     checkpoint = {
         "global_payload_sha256": summary.EXPECTED_GLOBAL_CHECKPOINT_SHA256,
         "all_npz_member_hashes_verified": True,
+        "artifact_sha256_by_process_index": {
+            str(rank): {
+                "manifest_sha256": artifact["manifest_sha256"],
+                "npz_sha256": artifact["npz_sha256"],
+                "local_payload_sha256": artifact["local_payload_sha256"],
+            }
+            for rank, artifact in summary.EXPECTED_CHECKPOINT_ARTIFACTS.items()
+        },
     }
     monkeypatch.setattr(
         summary,
@@ -343,6 +351,9 @@ def test_three_step_summary_accepts_exact_trajectory_and_checkpoint_gate(tmp_pat
     assert result["gate"]["fifty_step_probe_authorized"] is False
     assert result["trajectory"]["loss_monotonic_decrease"] is False
     assert result["memory"]["step_one_to_step_three_peak_slope_bytes"] == 86_016
+    assert result["checkpoint"]["artifact_sha256_by_process_index"]["0"][
+        "manifest_sha256"
+    ] == summary.EXPECTED_CHECKPOINT_ARTIFACTS[0]["manifest_sha256"]
 
 
 def test_three_step_summary_rejects_trajectory_drift(tmp_path, monkeypatch):

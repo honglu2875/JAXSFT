@@ -572,6 +572,18 @@ def _validate_checkpoint_artifacts(
             "all_npz_member_hashes_verified": True,
             "all_global_device_shards_covered": True,
             "all_replicated_payloads_equal": True,
+            "artifact_sha256_by_process_index": {
+                str(rank): {
+                    "manifest_sha256": EXPECTED_CHECKPOINT_ARTIFACTS[rank][
+                        "manifest_sha256"
+                    ],
+                    "npz_sha256": EXPECTED_CHECKPOINT_ARTIFACTS[rank]["npz_sha256"],
+                    "local_payload_sha256": EXPECTED_CHECKPOINT_ARTIFACTS[rank][
+                        "local_payload_sha256"
+                    ],
+                }
+                for rank in range(4)
+            },
         },
         manifests,
     )

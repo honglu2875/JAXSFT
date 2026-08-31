@@ -3,6 +3,28 @@
     "all_global_device_shards_covered": true,
     "all_npz_member_hashes_verified": true,
     "all_replicated_payloads_equal": true,
+    "artifact_sha256_by_process_index": {
+      "0": {
+        "local_payload_sha256": "6bd761d749c541a2f2c2937f64b5b508a3a74cb3cd58670029b689a36d7f4107",
+        "manifest_sha256": "23d0cbcdba88cdb333d7b58eee49ebbc5730d993c9eeec1ee2eace04fccd9f12",
+        "npz_sha256": "5d1b1c0aa1ce1e689fc040b959630445ee9ed921fabbca6cfde2567f17db405e"
+      },
+      "1": {
+        "local_payload_sha256": "330c54098ee06239e4b8aaa54812fb0bbcb6719b4b836d756d45bb6961f8e4e9",
+        "manifest_sha256": "e01f8d1577b5c3a0ec648252b0fe40b92df731f27b06c3bab205dcad6a574e44",
+        "npz_sha256": "b07b326976b85549b8c330e6cf4787dda844d5e349c66287b8f3f781afb707b6"
+      },
+      "2": {
+        "local_payload_sha256": "c878a9ef5eec584e37912819f7dadaec13e9b85c65da49d4cc9e219fc381f8ad",
+        "manifest_sha256": "21e4b69ca0c4052e22a03e84d4a974e70209d85a8be19d0ccff3023c812125fa",
+        "npz_sha256": "4df4fe939fab4e9a95708b6c76858ca6c760b5e26f829fe948c14ecbb7512df5"
+      },
+      "3": {
+        "local_payload_sha256": "bff14c22342e4cca3081f3e7078b4a125189467c4ea55cbedba508165b49d033",
+        "manifest_sha256": "df5e894893b651c9f2b42abe101bff51ff62ad06bf221db990b3a76f4365d955",
+        "npz_sha256": "2d2408a28568b4c34ed99f32f23682529c452602efd93c8a23760345263ca576"
+      }
+    },
     "checkpoint_step": 2,
     "format": "jaxsft_rank_local_sharded_pytree_npz",
     "frozen_base_included": false,
