@@ -104,8 +104,8 @@ Current branch status:
 | G5c2 full frozen forward | passed | run commit `da5c6a7`; [`glm53_full_forward_v4.json`](../results/glm53_full_forward_v4.json) |
 | G6a bounded expert input gradient | passed | run commit `ed28e50`; [`glm53_bounded_expert_v4.json`](../results/glm53_bounded_expert_v4.json) |
 | G6b0 full-model attention-LoRA backward compile | passed | run commit `56cd8b7`; [`glm53_lora_backward_compile_v4.json`](../results/glm53_lora_backward_compile_v4.json) |
-| G6b1 full-checkpoint attention-LoRA backward execution | pending | compile gate permits the bounded execution probe |
-| G6c loss/update/checkpoint, 3 steps | pending | blocked by G6b1 execution gate |
+| G6b1 full-checkpoint attention-LoRA backward execution | passed | run commit `ccd5416`; [`glm53_lora_backward_v4.json`](../results/glm53_lora_backward_v4.json) |
+| G6c loss/update/checkpoint, 3 steps | pending | G6b1 permits an optimizer compile gate, then one bounded execution probe |
 | G6d 10--50 step stability | pending | blocked by G6c |
 
 ### G0 — Metadata and static preflight
@@ -311,6 +311,22 @@ shapes and no flattened or token/top-k assignment-wide dense expert weight.
 This passes the compile-only G6b0 capacity gate and authorizes one smallest
 full-checkpoint backward execution. It does not prove finite loss/gradients,
 an optimizer update, or multi-step training.
+
+Measured G6b1 result: the complete pinned checkpoint executed that rank-4
+attention-LoRA backward on all four hosts. The weighted one-token loss was
+`12.241244316101074` on every rank. All gradients were finite. Canonical
+zero-`B` initialization produced exactly zero `A` gradients, while `B` had
+4,821,488 nonzero gradient elements across 169 leaves with squared L2 norm
+`7.319513320922852`. Loss and diagnostic hashes matched across ranks.
+
+The maximum backward time was 248.7 seconds. Peak HBM was 20,512,925,696 of
+33,014,407,168 bytes per chip, leaving 12,501,481,472 bytes of raw headroom;
+the smallest observed post-execution free block was 11,769,517,568 bytes.
+Each host streamed 80,141,139,062 checkpoint bytes with zero RAMFS payload
+growth. Optimized HLO remained capacity-bounded and all distributed shutdowns
+completed. This passes G6b1 and authorizes an adapter-only AdamW compile gate;
+it does not yet prove an optimizer update, checkpoint restore, or multi-step
+stability.
 
 ## Stop conditions
 

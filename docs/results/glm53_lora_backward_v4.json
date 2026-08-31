@@ -1,0 +1,115 @@
+{
+  "adapter": {
+    "a_partition_spec": [],
+    "b_partition_spec": [
+      null,
+      "model"
+    ],
+    "global_parameter_count": 10289152,
+    "global_parameter_count_by_factor": {
+      "a": 3956736,
+      "b": 6332416
+    },
+    "initialization_statistics": [
+      1.0,
+      254.57638549804688,
+      0.0,
+      0.044189453125,
+      0.0,
+      3956735.0,
+      0.0
+    ],
+    "maximum_initializer_seconds": 31.529330997960642,
+    "parameter_bytes_per_device": 8705024,
+    "target_count": 191
+  },
+  "execution": {
+    "alias_size_in_bytes": 0,
+    "all_distributed_shutdowns_complete": true,
+    "all_loss_and_gradients_finite": true,
+    "all_rank_hlo_equal": true,
+    "all_rank_loss_and_gradient_statistics_equal": true,
+    "argument_size_in_bytes": 20270928384,
+    "compiler_working_set_upper_bound_bytes_per_device": 21527759872,
+    "generated_code_size_in_bytes": 211123200,
+    "gradient_statistics": [
+      1.0,
+      0.0,
+      7.319513320922852,
+      0.0,
+      1466.92578125,
+      0.0,
+      0.1455078125,
+      0.0,
+      4821488.0,
+      0.0,
+      169.0
+    ],
+    "gradient_statistics_float32_sha256": "ef3fad7a12d9e968494bc1790d84cb424d8f48212247b8e1f75e00ee61ad9207",
+    "headroom_after_peak_bytes_per_device": 12501481472,
+    "host_argument_size_in_bytes": 0,
+    "host_output_size_in_bytes": 0,
+    "host_temp_size_in_bytes": 0,
+    "loss": 12.241244316101074,
+    "loss_float32_sha256": "ab4404e2ca8a94e73b62eef6c38d4a2e54f41f21d346d58230ba935c099c9101",
+    "maximum_backward_execute_seconds": 248.71280518593267,
+    "maximum_compile_seconds": 582.1578164040111,
+    "maximum_device_peak_bytes_in_use": 20512925696,
+    "maximum_elapsed_seconds_before_shutdown": 2215.9181903870776,
+    "maximum_gradient_statistics_seconds": 17.199221219168976,
+    "maximum_header_seconds": 38.049842688953504,
+    "maximum_initializer_seconds": 31.529330997960642,
+    "maximum_load_seconds": 1285.283767455956,
+    "maximum_process_vmhwm_bytes": 18493476864,
+    "minimum_largest_free_block_after_execution_bytes": 11769517568,
+    "no_assignment_wide_dense_weight_in_optimized_hlo": true,
+    "nonzero_b_gradient_elements": 4821488,
+    "nonzero_b_gradient_leaves": 169,
+    "optimized_hlo_sha256": "3062ea4ba05cb62b59132751e854cb17ae753829067286fa956e3113945c5fad",
+    "output_size_in_bytes": 8718336,
+    "temp_size_in_bytes": 1248113152,
+    "zero_initialized_b_gives_exact_zero_a_gradients": true
+  },
+  "gate": {
+    "full_model_lora_backward_proven": true,
+    "g6b1_full_attention_lora_backward": "passed",
+    "remaining_blockers": [
+      "No optimizer update has executed with the complete checkpoint.",
+      "Adapter-only checkpoint save/restore has not passed on the sharded state.",
+      "Three-step and 10--50-step loss/gradient/memory stability remain unmeasured."
+    ],
+    "three_step_optimizer_checkpoint_probe_authorized": true
+  },
+  "rank_result_sha256": [
+    "85b21f45f0edb01b5026f50eed754b845dcfa599b7b20d3a96d9ce2903fcc1bb",
+    "a80e7ea10f987130bf01a7f82dce9a6013af37d252ead95466386fe7c1fbcfe8",
+    "e373ac416b4a9ebcec1147a47e562710561c3bf536ae39385422fd62c1593f3a",
+    "f0ed0144d68110d21b8f07a9c80a6a51bc84d9723ac856699ebc45e1dce8402c"
+  ],
+  "schema_version": 1,
+  "source_revision": "ccd541611ec5b1d671c7d7c6cf4362671ccc2ba3",
+  "streaming": {
+    "base_bytes_per_device": 20234287352,
+    "loaded_logical_tensor_count": 37534,
+    "loaded_scale_tensor_count": 36467,
+    "loaded_target_count": 1372,
+    "maximum_load_seconds": 1285.283767455956,
+    "maximum_shm_used_delta_bytes": 0,
+    "network_bytes_across_hosts": 320564556248,
+    "network_bytes_per_host": 80141139062
+  },
+  "test": "glm53_g6b1_full_attention_lora_backward_acceptance",
+  "topology": {
+    "accelerator_type": "v4-32",
+    "global_device_count": 16,
+    "host_count": 4,
+    "physical_hostname_order_independent_of_process_index": true,
+    "physical_hostnames": [
+      "t1v-n-a09f5679-w-0",
+      "t1v-n-a09f5679-w-1",
+      "t1v-n-a09f5679-w-2",
+      "t1v-n-a09f5679-w-3"
+    ],
+    "process_count": 4
+  }
+}
