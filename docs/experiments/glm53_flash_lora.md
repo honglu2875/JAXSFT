@@ -105,8 +105,9 @@ Current branch status:
 | G6a bounded expert input gradient | passed | run commit `ed28e50`; [`glm53_bounded_expert_v4.json`](../results/glm53_bounded_expert_v4.json) |
 | G6b0 full-model attention-LoRA backward compile | passed | run commit `56cd8b7`; [`glm53_lora_backward_compile_v4.json`](../results/glm53_lora_backward_compile_v4.json) |
 | G6b1 full-checkpoint attention-LoRA backward execution | passed | run commit `ccd5416`; [`glm53_lora_backward_v4.json`](../results/glm53_lora_backward_v4.json) |
-| G6c loss/update/checkpoint, 3 steps | pending | G6b1 permits an optimizer compile gate, then one bounded execution probe |
-| G6d 10--50 step stability | pending | blocked by G6c |
+| G6c0 full-model adapter-only AdamW compile | passed | run commit `088c24a`; [`glm53_lora_optimizer_compile_v4.json`](../results/glm53_lora_optimizer_compile_v4.json) |
+| G6c1 loss/update/checkpoint, 3 steps | pending | G6c0 permits one bounded full-checkpoint execution probe |
+| G6d 10--50 step stability | pending | blocked by G6c1 |
 
 ### G0 — Metadata and static preflight
 
@@ -327,6 +328,21 @@ growth. Optimized HLO remained capacity-bounded and all distributed shutdowns
 completed. This passes G6b1 and authorizes an adapter-only AdamW compile gate;
 it does not yet prove an optimizer update, checkpoint restore, or multi-step
 stability.
+
+Measured G6c0 result: all ranks compiled the complete rank-4 attention-LoRA
+loss/backward, global-norm clipping, BF16 adapter update, and two FP32 AdamW
+moment slots using checkpoint headers only. The adapter uses 8,705,024 bytes
+per chip and optimizer state uses 34,820,100 bytes per chip. XLA reported
+43,581,952 donated alias bytes, but the authorization calculation
+conservatively did not subtract them.
+
+The executable reports 20,305,797,120 argument bytes, 43,587,584 output bytes,
+and 1,331,296,768 temporary bytes per chip. Their conservative sum is
+21,680,681,472 bytes, leaving 11,333,725,696 bytes against measured HBM before
+the 1 GiB reserve. Every rank emitted the same HLO hash with bounded expert
+shapes, read zero checkpoint payload bytes, and shut down cleanly. This passes
+G6c0 and authorizes one three-step full-checkpoint execution with an
+adapter-only save/restore boundary; it does not prove that execution yet.
 
 ## Stop conditions
 
