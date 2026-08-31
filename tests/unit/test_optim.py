@@ -4,6 +4,11 @@ import numpy as np
 from jaxsft.optim import AdamWHyperparameters, adamw_init, adamw_update, cosine_learning_rate
 
 
+def test_adamw_initial_moment_slots_do_not_alias_for_donation():
+    state = adamw_init({"kernel": jnp.ones((2, 2))})
+    assert state.first_moment["kernel"] is not state.second_moment["kernel"]
+
+
 def test_adamw_updates_matrix_and_does_not_decay_norm_vector():
     params = {"kernel": jnp.ones((2, 2)), "norm": jnp.ones((2,))}
     gradients = {"kernel": jnp.zeros((2, 2)), "norm": jnp.zeros((2,))}
