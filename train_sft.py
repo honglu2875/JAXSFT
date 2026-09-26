@@ -248,7 +248,10 @@ def replicated_state_sha256(params: object, optimizer: object) -> str:
         digest.update(len(metadata).to_bytes(8, "big"))
         digest.update(metadata)
         digest.update(array.nbytes.to_bytes(8, "big"))
-        digest.update(memoryview(array).cast("B"))
+        # Extension dtypes such as ml_dtypes.bfloat16 cannot expose a Python
+        # buffer directly. Reinterpret their storage without changing bytes;
+        # flattening first also supports scalar leaves with itemsize > 1.
+        digest.update(memoryview(array.reshape(-1).view(np.uint8)))
     return digest.hexdigest()
 
 

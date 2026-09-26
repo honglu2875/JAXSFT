@@ -173,6 +173,30 @@ def test_replicated_state_hash_covers_optimizer_and_parameters():
     assert replicated_state_sha256(params, optimizer._replace(step=jnp.asarray(1, jnp.int32))) != baseline
 
 
+def test_bfloat16_scalar_and_strided_state_checkpoint_round_trip(tmp_path):
+    params = {
+        "kernel": np.asarray(jnp.arange(12, dtype=jnp.bfloat16)).reshape(3, 4).T,
+        "scale": np.asarray(jnp.asarray(0.75, dtype=jnp.bfloat16)),
+    }
+    optimizer = adamw_init(params)._replace(step=jnp.asarray(2, jnp.int32))
+    identity = "e" * 64
+    state_hash = replicated_state_sha256(params, optimizer)
+    contiguous = jax.tree.map(lambda value: np.array(value, order="C"), params)
+    assert replicated_state_sha256(contiguous, optimizer) == state_hash
+    assert replicated_state_sha256({**params, "scale": params["scale"] + 0.125}, optimizer) != state_hash
+    checkpoint = save_checkpoint(
+        tmp_path, 2, params, optimizer, recipe_identity_hash=identity, source_identity=SOURCE,
+        topology=TOPOLOGY, data_state={"next_step": 2},
+        rng_state={"schema_version": 1, "model_init_seed": 17, "next_training_step": 2},
+    )
+    restored = load_checkpoint(checkpoint, recipe_identity_hash=identity, source_identity=SOURCE,
+                               topology=TOPOLOGY)
+    _assert_trees_equal(restored["params"], params)
+    _assert_trees_equal(restored["optimizer"], optimizer)
+    assert all(str(value.dtype) == "bfloat16" for value in jax.tree.leaves(restored["params"]))
+    assert replicated_state_sha256(restored["params"], restored["optimizer"]) == state_hash
+
+
 def test_git_source_identity_hashes_untracked_file_contents(tmp_path):
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     tracked = tmp_path / "tracked.py"
