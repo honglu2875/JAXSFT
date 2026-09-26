@@ -90,10 +90,16 @@ class BatchTape:
         local_device_count: int,
         accumulation_steps: int,
         per_device_batch_size: int,
+        process_index: int = 0,
+        process_count: int = 1,
     ) -> dict[str, np.ndarray]:
         if not 0 <= step < self.steps:
             raise IndexError(f"batch tape step {step} is outside [0, {self.steps})")
-        expected = local_device_count * accumulation_steps * per_device_batch_size
+        if process_count <= 0 or not 0 <= process_index < process_count:
+            raise ValueError("batch tape process index/count is invalid")
+        if min(local_device_count, accumulation_steps, per_device_batch_size) <= 0:
+            raise ValueError("batch tape topology dimensions must be positive")
+        expected = process_count * local_device_count * accumulation_steps * per_device_batch_size
         if self.batch_size != expected:
             raise ValueError(
                 f"batch tape has global batch {self.batch_size}, but topology/recipe require {expected}"
@@ -103,11 +109,15 @@ class BatchTape:
             flat = np.asarray(values[step])
             shaped = flat.reshape(
                 accumulation_steps,
+                process_count,
                 local_device_count,
                 per_device_batch_size,
                 self.length,
             )
-            result[name] = np.swapaxes(shaped, 0, 1)
+            # Global order is accumulation, runtime rank, local device, example.
+            # Selecting rank before swapping axes preserves single-host replay
+            # and makes every global example appear on exactly one process.
+            result[name] = np.swapaxes(shaped[:, process_index], 0, 1)
         return result
 
     def state_dict(self, *, next_step: int) -> dict[str, Any]:

@@ -87,6 +87,35 @@ def test_batch_tape_rejects_tampered_array_and_manifest_identity(tmp_path):
         BatchTape.load(clean.root)
 
 
+@pytest.mark.parametrize("processes,devices,accumulation", [(2, 2, 1), (2, 1, 2), (4, 1, 1)])
+def test_distributed_replay_covers_global_batch_once_and_preserves_accumulation(
+    tmp_path, processes, devices, accumulation,
+):
+    tape = _write(tmp_path)
+    global_batch = tape.jax_batch(1, local_device_count=processes * devices,
+                                 accumulation_steps=accumulation, per_device_batch_size=1)
+    ranks = [tape.jax_batch(1, local_device_count=devices, accumulation_steps=accumulation,
+                            per_device_batch_size=1, process_index=rank, process_count=processes)
+             for rank in range(processes)]
+    for name in global_batch:
+        np.testing.assert_array_equal(np.concatenate([batch[name] for batch in ranks]), global_batch[name])
+    state = tape.state_dict(next_step=1)
+    tape.validate_state_dict(state, expected_step=1)
+    for rank, batch in enumerate(ranks):
+        resumed = tape.jax_batch(state["next_step"], local_device_count=devices,
+                                 accumulation_steps=accumulation, per_device_batch_size=1,
+                                 process_index=rank, process_count=processes)
+        np.testing.assert_array_equal(batch["input_ids"], resumed["input_ids"])
+
+
+@pytest.mark.parametrize("process_index,process_count", [(0, 0), (-1, 2), (2, 2)])
+def test_distributed_tape_rejects_invalid_rank(tmp_path, process_index, process_count):
+    with pytest.raises(ValueError, match="process index/count"):
+        _write(tmp_path).jax_batch(0, local_device_count=1, accumulation_steps=1,
+                                  per_device_batch_size=1, process_index=process_index,
+                                  process_count=process_count)
+
+
 def test_hugging_face_oracle_independently_parses_recipe_and_tape(tmp_path):
     config_path = Path(__file__).parents[2] / "configs" / "recipes" / "olmo2_1b_ultrachat_trajectory_20.yaml"
     assert load_oracle_recipe(config_path).identity_hash == load_recipe(config_path).identity_hash
