@@ -36,6 +36,15 @@ The public 1,543,714,304-parameter checkpoint passed a float32 comparison of all
 `0.0000103037` (`atol=rtol=3e-4`). This is an implementation comparison, not a
 proof-generation quality measurement.
 
+A second CPU check used a 62-token prompt left-padded to 256 positions. The
+float32 JAX forward path matched the independent HF float32 final-position
+logits within `4.63e-5`. BF16 is not covered by that parity claim: on this prompt
+the BF16 JAX path differed from HF float32 by up to `4.0554` and changed the
+highest-scoring token. A local cached decoder showed the same precision effect;
+its float32 logits matched HF within `3.77e-5`. Use float32 for numerical
+comparisons. The BF16 TPU smoke below establishes distributed execution, not
+equivalence to an HF float32 trajectory or proof-generation quality.
+
 A v4-32 run completed three real BF16 updates across four processes and 16
 global TPU devices. All reduced metrics agreed exactly across ranks, each rank
 received a distinct first batch, and every process shut down cleanly. First-step
