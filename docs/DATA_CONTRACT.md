@@ -376,7 +376,16 @@ non-prefix masks, negative/non-finite weights, weights on padding or first token
 with a zero selected-loss denominator.
 
 `train_sft.py --batch-tape` reshapes each global batch into the declared local
-device/microbatch layout without rerunning dataset logic. The independent CPU
+device/microbatch layout without rerunning dataset logic. With multiple JAX
+processes, all hosts must load the same tape identity and its global batch must
+equal `process_count * local_device_count * accumulation_steps * per_device_batch_size`.
+The flat batch order is accumulation step, JAX runtime rank, local device, then
+example. Each process receives a disjoint slice; hostname or inventory order
+does not determine that slice. Stage the complete tape independently on each
+host and keep it available for resume. The tape cursor still counts completed
+global updates, so restoring step N consumes batch N on every process.
+
+The independent CPU
 oracle reimplements manifest and array validation without importing JAXSFT, so
 the comparison shares bytes but not the loader, model, loss kernel, optimizer,
 or scheduler implementation. Comparison requires identical recipe/tape hashes,
