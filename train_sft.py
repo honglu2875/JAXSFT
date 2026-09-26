@@ -641,11 +641,11 @@ def run(args: argparse.Namespace) -> int:
 
     batch_tape = None
     if args.batch_tape:
-        if process_count != 1:
-            raise RuntimeError("batch-tape trajectory validation currently requires one JAX process")
         batch_tape = BatchTape.load(args.batch_tape, expected_recipe_identity=recipe.identity_hash)
+        if len(set(allgather_sha256(batch_tape.identity_hash))) != 1:
+            raise RuntimeError("batch tape identity differs across JAX processes")
         expected_batch_size = (
-            local_device_count
+            process_count * local_device_count
             * recipe.training.gradient_accumulation_steps
             * recipe.training.per_device_batch_size
         )
@@ -822,6 +822,8 @@ def run(args: argparse.Namespace) -> int:
                 local_device_count=local_device_count,
                 accumulation_steps=recipe.training.gradient_accumulation_steps,
                 per_device_batch_size=recipe.training.per_device_batch_size,
+                process_index=process_index,
+                process_count=process_count,
             )
             tape_step += 1
             return batch
