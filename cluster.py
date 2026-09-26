@@ -195,6 +195,29 @@ def _parallel(hosts: tuple[str, ...], operation: Callable[[str], Any]) -> dict[s
     return results
 
 
+def _pdsh_launch(profile: ClusterProfile, remote_run: PurePosixPath, commands: dict[str, str]) -> None:
+    """Use pdsh to fan out exact rank scripts while preserving the SSH profile."""
+    if shutil.which("pdsh") is None:
+        raise ClusterError("--launcher=pdsh requires pdsh with the exec transport")
+
+    def stage(host: str):
+        rank = profile.hosts.index(host)
+        script = remote_run / f"launch-{rank}.sh"
+        command = f"set -eu; umask 077; test ! -e {shlex.quote(str(script))}; cat > {shlex.quote(str(script))}"
+        return _ssh(profile, host, command, input_bytes=(commands[host] + "\n").encode(), timeout=30)
+
+    _check_results(_parallel(profile.hosts, stage), "pdsh launch-script staging")
+    # The exec transport forwards the argument vector directly, so identity-file
+    # and known-host paths retain the same quoting/semantics as direct SSH.
+    command = [
+        "pdsh", "-S", "-R", "exec", "-f", str(len(profile.hosts)),
+        "-w", ",".join(profile.hosts), *_ssh_base(profile, "%h"),
+        "sh " + shlex.quote(str(remote_run / "launch-%n.sh")),
+    ]
+    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    _check_results({"pdsh": result}, "pdsh launch")
+
+
 def _check_results(results: dict[str, Any], action: str) -> None:
     failures = []
     for host, result in results.items():
@@ -619,6 +642,7 @@ def run_remote(profile: ClusterProfile, args: argparse.Namespace) -> int:
         )
 
     if args.dry_run:
+        print(f"launcher={getattr(args, 'launcher', 'ssh')}")
         for rank, host in enumerate(profile.hosts):
             print(f"[{host}] bootstrap uv: {local_uv} -> {remote_uv} (sha256={uv_digest})")
             print(f"[{host}] prepare: {prepare}")
@@ -646,11 +670,17 @@ def run_remote(profile: ClusterProfile, args: argparse.Namespace) -> int:
         lambda host: _ssh(profile, host, _remote_libtpu_preflight_command(), timeout=30),
     )
     _check_results(preflighted, "libtpu preflight")
-    launched = _parallel(
-        profile.hosts,
-        lambda host: _ssh(profile, host, launch_command(profile.hosts.index(host)), timeout=30),
-    )
-    _check_results(launched, "launch")
+    if getattr(args, "launcher", "ssh") == "pdsh":
+        _pdsh_launch(
+            profile, remote_run,
+            {host: launch_command(rank) for rank, host in enumerate(profile.hosts)},
+        )
+    else:
+        launched = _parallel(
+            profile.hosts,
+            lambda host: _ssh(profile, host, launch_command(profile.hosts.index(host)), timeout=30),
+        )
+        _check_results(launched, "launch")
     save_state(profile, dataclasses.replace(state, recipe=recipe))
     print(json.dumps({"run_id": state.run_id, "status": "launched", "hosts": profile.hosts}, indent=2))
     return 0
@@ -786,6 +816,7 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--dry-run", action="store_true")
         if name == "run":
             command.add_argument("--recipe", required=True)
+            command.add_argument("--launcher", choices=["ssh", "pdsh"], default="ssh")
             command.add_argument("--synthetic", action="store_true")
             command.add_argument("--synthetic-length", type=int, default=32)
             command.add_argument("--synthetic-vocab-size", type=int, default=128)
