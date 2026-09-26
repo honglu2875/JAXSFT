@@ -449,21 +449,46 @@ def validate_rng_checkpoint(raw: object, *, seed: int, expected_step: int) -> No
 
 
 def replicate_pmap_tree(tree: object, devices: list[jax.Device]) -> object:
-    """Place one explicit copy of every state leaf on each local pmap device."""
+    """Place state leaves directly, without compiling a whole-state broadcast."""
 
     if not devices:
         raise ValueError("pmap replication requires at least one local device")
-    replicate = jax.pmap(
-        lambda _replica, value: value,
-        in_axes=(0, None),
-        out_axes=0,
-        devices=devices,
+    if len(set(devices)) != len(devices) or any(device.process_index != jax.process_index() for device in devices):
+        raise ValueError("pmap replication requires distinct local devices")
+    mesh = jax.sharding.Mesh(np.asarray(devices), ("replica",))
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("replica"))
+
+    def place(value):
+        host = np.asarray(jax.device_get(value))
+        buffers = [jax.device_put(host[None], device) for device in devices]
+        return jax.make_array_from_single_device_arrays(
+            (len(devices), *host.shape), sharding, buffers
+        )
+
+    return jax.tree.map(place, tree)
+
+
+def _first_replica_on_host(value: jax.Array, local_device_count: int) -> np.ndarray:
+    # Indexing value[0] dispatches a device computation and can allocate a
+    # second model/optimizer on an already-full accelerator. Read the existing
+    # local shard instead, and remove the leading axis with NumPy on the host.
+    for shard in value.addressable_shards:
+        index = shard.index
+        if (
+            isinstance(index[0], slice)
+            and index[0].indices(local_device_count) == (0, 1, 1)
+            and all(isinstance(axis, slice) and axis.indices(size) == (0, size, 1)
+                    for axis, size in zip(index[1:], value.shape[1:], strict=True))
+            and shard.data.shape == (1, *value.shape[1:])
+        ):
+            return np.asarray(jax.device_get(shard.data))[0]
+    raise ValueError(
+        "pmap state must have a complete, addressable first replica sharded only on the leading axis"
     )
-    return replicate(np.arange(len(devices), dtype=np.int32), tree)
 
 
 def unreplicate_pmap_tree(tree: object, *, local_device_count: int) -> object:
-    """Select one rank-local replica for checkpointing replicated train state."""
+    """Copy one rank-local replica to host RAM without allocating device state."""
 
     if local_device_count <= 0:
         raise ValueError("local_device_count must be positive")
@@ -474,7 +499,7 @@ def unreplicate_pmap_tree(tree: object, *, local_device_count: int) -> object:
                 "pmap state leaf does not have the expected local replica axis: "
                 f"shape={value.shape}, local_device_count={local_device_count}"
             )
-        return value[0]
+        return _first_replica_on_host(value, local_device_count)
 
     return jax.tree.map(first_replica, tree)
 
