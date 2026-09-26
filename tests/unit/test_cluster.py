@@ -20,10 +20,58 @@ def test_public_cluster_profile_has_four_placeholder_hosts_and_safe_roots():
     assert profile.coordinator_host == profile.hosts[0]
 
 
+def test_pdsh_launch_stages_exact_host_scripts_and_propagates_failure(monkeypatch):
+    profile = cluster.load_profile(PROFILE)
+    calls = []
+    monkeypatch.setattr(cluster.shutil, "which", lambda name: "/usr/bin/pdsh")
+    def fake_ssh(profile, host, command, **kwargs):
+        calls.append((host, command, kwargs["input_bytes"]))
+        return subprocess.CompletedProcess([], 0, b"", b"")
+    monkeypatch.setattr(cluster, "_ssh", fake_ssh)
+    captured = []
+    def fake_run(command, **kwargs):
+        captured.append(command)
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+    monkeypatch.setattr(cluster.subprocess, "run", fake_run)
+    commands = {host: f"echo rank-{rank}" for rank, host in enumerate(profile.hosts)}
+    cluster._pdsh_launch(profile, cluster.PurePosixPath("/var/tmp/jaxsft-runs/test"), commands)
+    assert {host: data.decode().strip() for host, _, data in calls} == commands
+    assert captured[0][:5] == ["pdsh", "-S", "-R", "exec", "-f"]
+    assert captured[0][-1] == "sh /var/tmp/jaxsft-runs/test/launch-%n.sh"
+    assert "-o" in captured[0] and "BatchMode=yes" in captured[0]
+    monkeypatch.setattr(cluster.subprocess, "run", lambda command, **kwargs:
+                        subprocess.CompletedProcess(command, 1, b"", b"worker failed"))
+    with pytest.raises(cluster.ClusterError, match="pdsh launch"):
+        cluster._pdsh_launch(profile, cluster.PurePosixPath("/var/tmp/jaxsft-runs/failure"), commands)
+
+
 @pytest.mark.parametrize("value", ["../bad", "/", "/tmp", "bad/relative", "contains/slash"])
 def test_run_id_rejects_path_like_values(value):
     with pytest.raises(cluster.ClusterError):
         cluster.validate_run_id(value)
+
+
+def test_pdsh_staging_failure_prevents_launch(monkeypatch):
+    profile = cluster.load_profile(PROFILE)
+    monkeypatch.setattr(cluster.shutil, "which", lambda name: "/usr/bin/pdsh")
+    monkeypatch.setattr(
+        cluster, "_ssh",
+        lambda *args, **kwargs: subprocess.CompletedProcess([], 1, b"", b"existing launch script"),
+    )
+    monkeypatch.setattr(cluster.subprocess, "run", lambda *args, **kwargs: pytest.fail("must not launch"))
+    with pytest.raises(cluster.ClusterError, match="launch-script staging"):
+        cluster._pdsh_launch(profile, cluster.PurePosixPath("/var/tmp/jaxsft-runs/test"),
+                             {host: "true" for host in profile.hosts})
+
+
+def test_pdsh_requires_local_executable_and_parser_preserves_ssh_default(monkeypatch):
+    profile = cluster.load_profile(PROFILE)
+    monkeypatch.setattr(cluster.shutil, "which", lambda name: None)
+    with pytest.raises(cluster.ClusterError, match="requires pdsh"):
+        cluster._pdsh_launch(profile, cluster.PurePosixPath("/var/tmp/jaxsft-runs/test"), {})
+    arguments = ["run", "--profile", str(PROFILE), "--recipe", "fixture.yaml"]
+    assert cluster.parser().parse_args(arguments).launcher == "ssh"
+    assert cluster.parser().parse_args([*arguments, "--launcher", "pdsh"]).launcher == "pdsh"
 
 
 def test_source_capsule_contains_research_code_and_excludes_generated_state():

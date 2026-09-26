@@ -206,7 +206,18 @@ that a later edit mutates a running job.
 
 ### Launch
 
-- Launch one identical command per host concurrently through OpenSSH.
+- Launch one command per host concurrently through OpenSSH. `cluster.py run
+  --launcher pdsh` optionally uses a controller-local `pdsh` executable with
+  its `exec` transport to fan out the same rank-specific commands. The default
+  remains `--launcher ssh`; workers do not need `pdsh` installed.
+- The pdsh path stages one immutable launch script per inventory rank, then
+  forwards the profile's OpenSSH argument vector unchanged. `pdsh -S` reports
+  remote failures as a controller failure. Status, stop, collection, and JAX
+  process identity follow the same protocol for either launcher.
+- A four-host v4-32 synthetic run through pdsh completed four updates and a
+  fresh-process restore from step two. All ranks and both runs produced the
+  same final model/optimizer state hash. See the
+  [pdsh acceptance record](results/pdsh_v4_32_acceptance.json).
 - Pass a run ID, source path, resolved config path, and safe environment only.
 - The worker calls `jax.distributed.initialize()` before `jax.devices()`,
   `local_device_count()`, mesh construction, or checkpoint setup.

@@ -1,0 +1,24 @@
+{
+  "date": "2026-09-26",
+  "upstream_base": "4312f8cd0e7e690be1be5730faf32ae879dfa86c",
+  "tested_source_capsule_sha256": "cd7a9ba00e0a2f1976548ac266b94add4adbd5046fc93ac493c5e6ac98de02a3",
+  "launcher": "pdsh -S -R exec",
+  "recipe": "configs/recipes/qwen35_tiny_resume_smoke.yaml",
+  "synthetic_length": 24,
+  "synthetic_vocab_size": 96,
+  "process_count": 4,
+  "local_device_count": 4,
+  "global_device_count": 16,
+  "completed_steps": 4,
+  "distinct_rank_first_batches": 4,
+  "all_ranks_completed_and_shut_down": true,
+  "resume_from_step": 2,
+  "fresh_process_resume_completed": true,
+  "uninterrupted_and_resumed_final_loss": 4.5686564445495605,
+  "all_ranks_and_both_runs_final_model_optimizer_sha256": "7b939a28c628c67ea47fc2279a82e22d4519b1eca07fcfa31945b486851e7602",
+  "unit_tests": "83 passed",
+  "limitations": [
+    "Synthetic model correctness check; not a training quality or throughput result.",
+    "Checkpoint equality covers the same replicated four-process topology."
+  ]
+}
