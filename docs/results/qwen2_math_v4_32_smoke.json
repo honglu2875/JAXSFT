@@ -1,0 +1,91 @@
+{
+  "date": "2026-09-26",
+  "model": "Qwen/Qwen2.5-Math-1.5B",
+  "revision": "4a83ca6e4526a4f2da3aa259ec36c259f66b2ab2",
+  "parameters": 1543714304,
+  "source_capsule_sha256": "70c0d42eefe38be96b7e70a1baab1cd2f83188be0d9af046f6129a25ce1ca992",
+  "float32_public_checkpoint_parity": {
+    "torch": "2.13.0+cpu",
+    "transformers": "5.16.1",
+    "jax": "0.11.0",
+    "logits_compared": 759680,
+    "max_absolute_error": 0.000171661376953125,
+    "mean_absolute_error": 1.0303736416972242e-05,
+    "rtol": 0.0003,
+    "atol": 0.0003
+  },
+  "cpu_validation": {
+    "unit_suite": 92,
+    "additional_renderer_tests": 4,
+    "parity_tests_including_public_checkpoint": 7
+  },
+  "tpu": {
+    "type": "v4-32",
+    "process_count": 4,
+    "local_device_count": 4,
+    "global_device_count": 16,
+    "parameter_dtype": "bfloat16",
+    "length": 256,
+    "global_batch_size": 16,
+    "steps": 3,
+    "launcher": "pdsh",
+    "distinct_rank_first_batches": 4,
+    "all_reduced_metrics_equal_across_ranks": true,
+    "all_ranks_clean_shutdown": true,
+    "metrics": [
+      {
+        "step": 1,
+        "loss": 1.8863881826400757,
+        "gradient_norm": 4.110222816467285,
+        "loss_numerator": 6709.8828125,
+        "loss_denominator": 3557.0,
+        "input_tokens": 4096.0,
+        "selected_accuracy": 0.5662074685096741,
+        "learning_rate": 0.0
+      },
+      {
+        "step": 2,
+        "loss": 1.761258840560913,
+        "gradient_norm": 3.5372798442840576,
+        "loss_numerator": 5706.478515625,
+        "loss_denominator": 3240.0,
+        "input_tokens": 4096.0,
+        "selected_accuracy": 0.608950674533844,
+        "learning_rate": 1.9999999494757503e-05
+      },
+      {
+        "step": 3,
+        "loss": 1.9252792596817017,
+        "gradient_norm": 3.2523608207702637,
+        "loss_numerator": 6370.7490234375,
+        "loss_denominator": 3309.0,
+        "input_tokens": 4096.0,
+        "selected_accuracy": 0.5799335241317749,
+        "learning_rate": 1.0999999176419806e-05
+      }
+    ],
+    "first_step_seconds_range": [
+      78.1974333889666,
+      78.19796883303206
+    ],
+    "subsequent_step_seconds_range": [
+      0.15509313100483268,
+      0.18722744297701865
+    ]
+  },
+  "limitations": [
+    "Three-update infrastructure smoke, not proof-generation or ablation evidence.",
+    "No full-size optimizer checkpoint was written during this smoke.",
+    "Numerical parity and public-checkpoint support apply to the pinned Math 1.5B model.",
+    "Float32 parity does not establish BF16 trajectory parity; the longer prompt probe changes its leading token in BF16."
+  ],
+  "long_prompt_precision_probe": {
+    "prompt_tokens": 62,
+    "left_padded_length": 256,
+    "compared_final_position_logits": 151936,
+    "float32_jax_vs_hf_float32_max_absolute_error": 4.6253204345703125e-05,
+    "bfloat16_jax_vs_hf_float32_max_absolute_error": 4.055382251739502,
+    "highest_scoring_token_changed_in_bfloat16": true,
+    "scope": "One prompt; establishes a precision sensitivity, not general quality estimates."
+  }
+}

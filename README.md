@@ -12,6 +12,10 @@ in its checked-in recipe or renderer identity.
 
 ## What works now
 
+- Pure-JAX Qwen2/Qwen2.5-Math with Q/K/V biases, pre-sublayer RMSNorm,
+  grouped-query attention, SwiGLU, tied or untied heads, and the pinned Math
+  text renderer. See [the model notes](docs/models/qwen2.md) for numerical
+  validation and supported configurations.
 - Pure-JAX dense Qwen3.5 in one model file: Gated DeltaNet, gated full
   attention, dense SwiGLU, direct safetensors mapping, strict shape checks, and
   a tied language-model head.
@@ -46,7 +50,8 @@ in its checked-in recipe or renderer identity.
 
 The offline CPU suite, byte/token template fixtures, and tiny-model
 valid-logit/loss/gradient/AdamW-step parity against Transformers and PyTorch
-pass for both architectures. Qwen has an exact 320-tensor,
+pass for Qwen3.5 and OLMo 2; Qwen2 validation is documented in its model notes.
+Qwen3.5 has an exact 320-tensor,
 752,393,024-parameter public-checkpoint audit. A measured single-host v4-8 run
 completed five live Qwen UltraChat updates across four TPU devices with finite
 loss and gradients. The first backward compile took about 101 seconds; a

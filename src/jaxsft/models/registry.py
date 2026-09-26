@@ -42,6 +42,27 @@ def get_model_implementation(architecture: str) -> ModelImplementation:
             tiny_config,
             validate_params,
         )
+    if architecture == "qwen2":
+        from .qwen2 import (
+            Qwen2Config,
+            forward,
+            init_params,
+            load_hf_checkpoint,
+            parameter_count,
+            tiny_config,
+            validate_params,
+        )
+
+        return ModelImplementation(
+            architecture,
+            Qwen2Config,
+            forward,
+            init_params,
+            load_hf_checkpoint,
+            parameter_count,
+            tiny_config,
+            validate_params,
+        )
     if architecture == "olmo2":
         from .olmo2 import (
             Olmo2Config,
