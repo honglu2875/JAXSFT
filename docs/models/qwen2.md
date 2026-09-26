@@ -36,6 +36,13 @@ The public 1,543,714,304-parameter checkpoint passed a float32 comparison of all
 `0.0000103037` (`atol=rtol=3e-4`). This is an implementation comparison, not a
 proof-generation quality measurement.
 
+A v4-32 run completed three real BF16 updates across four processes and 16
+global TPU devices. All reduced metrics agreed exactly across ranks, each rank
+received a distinct first batch, and every process shut down cleanly. First-step
+compilation/execution took about 78.2 seconds; subsequent steps took 0.155–0.187
+seconds per host. The run did not write a full-size optimizer checkpoint. See
+the [sanitized acceptance record](../results/qwen2_math_v4_32_smoke.json).
+
 ```bash
 JAX_PLATFORMS=cpu uv run --extra parity pytest tests/parity/test_qwen2_hf.py
 # Set JAXSFT_QWEN2_MATH_SNAPSHOT to the pinned local checkpoint for tokenizer tests.
