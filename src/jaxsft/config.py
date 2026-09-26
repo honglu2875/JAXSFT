@@ -127,8 +127,8 @@ def load_recipe(path: str | Path) -> Recipe:
         dtype=str(model.get("dtype", "bfloat16")),
         local_path=model.get("local_path"),
     )
-    if model_spec.architecture not in {"qwen3_5", "olmo2"}:
-        raise ValueError("supported model architectures are: olmo2, qwen3_5")
+    if model_spec.architecture not in {"qwen2", "qwen3_5", "olmo2"}:
+        raise ValueError("supported model architectures are: olmo2, qwen2, qwen3_5")
     if model_spec.dtype not in {"bfloat16", "float32"}:
         raise ValueError("model.dtype must be bfloat16 or float32")
     if not model_spec.repo_id or not model_spec.revision:
@@ -161,8 +161,8 @@ def load_recipe(path: str | Path) -> Recipe:
         shuffle_seed=int(data.get("shuffle_seed", 17)),
         shuffle_buffer_size=int(data.get("shuffle_buffer_size", 10_000)),
     )
-    if data_spec.renderer not in {None, "qwen3_5", "olmo2_instruct"}:
-        raise ValueError("data.renderer must be qwen3_5 or olmo2_instruct")
+    if data_spec.renderer not in {None, "qwen2_5_math", "qwen3_5", "olmo2_instruct"}:
+        raise ValueError("data.renderer must be qwen2_5_math, qwen3_5 or olmo2_instruct")
     if data_spec.loading_mode not in {"streaming", "materialized"}:
         raise ValueError("data.loading_mode must be streaming or materialized")
     if data_spec.shuffle_buffer_size <= 0:

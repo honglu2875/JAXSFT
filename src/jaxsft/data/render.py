@@ -13,6 +13,8 @@ BoundaryOwner = Literal["left", "right", "reject"]
 
 QWEN35_TEMPLATE_REPO = "Qwen/Qwen3.5-0.8B-Base"
 QWEN35_TEMPLATE_REVISION = "dc7cdfe2ee4154fa7e30f5b51ca41bfa40174e68"
+QWEN2_MATH_TEMPLATE_REPO = "Qwen/Qwen2.5-Math-1.5B"
+QWEN2_MATH_TEMPLATE_REVISION = "4a83ca6e4526a4f2da3aa259ec36c259f66b2ab2"
 
 
 @dataclass(frozen=True)
@@ -465,7 +467,52 @@ def render_olmo2_instruct(sample: Sample, *, add_generation_prompt: bool = False
     )
 
 
+def render_qwen2_5_math(sample: Sample, *, add_generation_prompt: bool = False) -> RenderedDocument:
+    """The pinned Qwen2.5-Math text template, preserving content whitespace.
+
+    Tool calls and separate reasoning fields are rejected: the supported
+    template subset represents assistant reasoning as ordinary content text.
+    """
+    if sample.tools or any(message.role not in {"system", "user", "assistant"} for message in sample.messages):
+        raise ValueError("Qwen2.5-Math text rendering requires system/user/assistant messages without tools")
+    if any(part.kind not in {"text", "code"} for message in sample.messages for part in message.parts):
+        raise ValueError("Qwen2.5-Math text rendering supports text/code content parts only")
+    spans: list[RenderedSpan] = []
+    if sample.messages[0].role != "system":
+        spans.append(_span(
+            sample,
+            "<|im_start|>system\nPlease reason step by step, and put your final answer within \\boxed{}."
+            "<|im_end|>\n",
+            "template_control", role="system",
+        ))
+    for index, message in enumerate(sample.messages):
+        spans.append(_span(sample, f"<|im_start|>{message.role}\n", "role_header",
+                           message_index=index, role=message.role))
+        weight = 1.0 if message.role == "assistant" else 0.0
+        for part_index, part in enumerate(message.parts):
+            if not isinstance(part.value, str):
+                raise TypeError("Qwen2.5-Math text/code content must be a string")
+            spans.append(_span(sample, part.value, "content", message_index=index,
+                               part_index=part_index, part=part, role=message.role, default_weight=weight))
+        spans.append(_span(sample, "<|im_end|>", "assistant_end" if weight else "turn_end",
+                           message_index=index, role=message.role, default_weight=weight))
+        spans.append(_span(sample, "\n", "turn_end", message_index=index, role=message.role))
+    if add_generation_prompt:
+        spans.append(_span(sample, "<|im_start|>assistant\n", "generation_prompt", role="assistant"))
+    return RenderedDocument(
+        sample_id=sample.id, spans=tuple(span for span in spans if span.text),
+        renderer="qwen2_5_math", renderer_version=1,
+        options=FrozenMap((
+            ("add_generation_prompt", add_generation_prompt),
+            ("template_repo_id", QWEN2_MATH_TEMPLATE_REPO),
+            ("template_revision", QWEN2_MATH_TEMPLATE_REVISION),
+        )),
+    )
+
+
 def get_renderer(name: str):
+    if name in {"qwen2", "qwen2_5_math"}:
+        return render_qwen2_5_math
     if name in {"qwen3_5", "qwen3_5_text"}:
         return render_qwen3_5
     if name in {"olmo2", "olmo2_instruct"}:
@@ -474,6 +521,13 @@ def get_renderer(name: str):
 
 
 def renderer_identity(name: str) -> dict[str, str | int]:
+    if name in {"qwen2", "qwen2_5_math"}:
+        return {
+            "name": "qwen2_5_math",
+            "version": 1,
+            "template_repo_id": QWEN2_MATH_TEMPLATE_REPO,
+            "template_revision": QWEN2_MATH_TEMPLATE_REVISION,
+        }
     if name in {"qwen3_5", "qwen3_5_text"}:
         return {
             "name": "qwen3_5_text",

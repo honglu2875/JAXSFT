@@ -78,3 +78,12 @@ def test_invalid_data_loading_mode_is_rejected(tmp_path):
     path.write_text(RECIPE.read_text().replace("  split: train_sft\n", "  split: train_sft\n  loading_mode: magic\n"))
     with pytest.raises(ValueError, match="loading_mode"):
         load_recipe(path)
+
+
+def test_qwen2_math_recipe_pins_checkpoint_and_renderer():
+    recipe = load_recipe(RECIPE.with_name("qwen25_math_1_5b_ultrachat_smoke.yaml"))
+    assert recipe.model.architecture == "qwen2"
+    assert recipe.model.repo_id == "Qwen/Qwen2.5-Math-1.5B"
+    assert len(recipe.model.revision) == 40
+    assert recipe.data.renderer == "qwen2_5_math"
+    assert recipe.data.loading_mode == "materialized"
