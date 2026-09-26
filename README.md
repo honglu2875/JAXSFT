@@ -120,6 +120,9 @@ See the [hostname-free trajectory evidence](docs/results/olmo2_1b_trajectory_par
 
 ## Quick start
 
+For model-independent adapter math and explicit trainable parameter trees,
+see the [LoRA primitives](docs/LORA.md). Trainer integration is separate.
+
 Python 3.12 and `uv` are required.
 
 ```bash
